@@ -107,6 +107,10 @@ AppleEHCIQueueHead::print(int level)
     USBLog(level, "AppleEHCIQueueHead::print - shared.extBuffPtr[2][%p]", (void*)USBToHostLong(shared->extBuffPtr[2]));
     USBLog(level, "AppleEHCIQueueHead::print - shared.extBuffPtr[3][%p]", (void*)USBToHostLong(shared->extBuffPtr[3]));
     USBLog(level, "AppleEHCIQueueHead::print - shared.extBuffPtr[4][%p]", (void*)USBToHostLong(shared->extBuffPtr[4]));
+	USBLog(level, "AppleEHCIQueueHead::print - _qTD[%p]", (void*)_qTD);
+	USBLog(level, "AppleEHCIQueueHead::print - _TailTD[%p]", (void*)_TailTD);
+	USBLog(level, "AppleEHCIQueueHead::print - _maxPacketSize[%p]", (void*)_maxPacketSize);
+	USBLog(level, "AppleEHCIQueueHead::print - _direction[%p]", (void*)_direction);
 	USBLog(level, "----------------------------------------------------");
 }
 
@@ -277,8 +281,8 @@ AppleEHCIIsochTransferDescriptor::UpdateFrameList(AbsoluteTime timeStamp)
 			{
 				pLLFrames[_frameIndex + j].frActCount = OSSwapInt16(pLLFrames[_frameIndex + j].frActCount);
 				pLLFrames[_frameIndex + j].frReqCount = OSSwapInt16(pLLFrames[_frameIndex + j].frReqCount);
-				pLLFrames[_frameIndex + j].frTimeStamp.lo = OSSwapInt32(timeStamp.lo);
-				pLLFrames[_frameIndex + j].frTimeStamp.hi = OSSwapInt32(timeStamp.hi);;
+				AbsoluteTime_to_scalar(&pLLFrames[_frameIndex + j].frTimeStamp) 
+				= OSSwapInt64(AbsoluteTime_to_scalar(&timeStamp));
 				pLLFrames[_frameIndex + j].frStatus = OSSwapInt32(frStatus);
 			}
 			else
@@ -465,8 +469,8 @@ AppleEHCISplitIsochTransferDescriptor::UpdateFrameList(AbsoluteTime timeStamp)
 		{
 			pLLFrames[_frameIndex].frActCount = OSSwapInt16(frActualCount);
 			pLLFrames[_frameIndex].frReqCount = OSSwapInt16(pLLFrames[_frameIndex].frReqCount);
-			pLLFrames[_frameIndex].frTimeStamp.lo = OSSwapInt32(timeStamp.lo);
-			pLLFrames[_frameIndex].frTimeStamp.hi = OSSwapInt32(timeStamp.hi);;
+			AbsoluteTime_to_scalar(&pLLFrames[_frameIndex].frTimeStamp) 
+			= OSSwapInt64(AbsoluteTime_to_scalar(&timeStamp));
 			pLLFrames[_frameIndex].frStatus = OSSwapInt32(frStatus);
 		}
 		else

@@ -464,15 +464,6 @@ IOUSBControllerV3::systemWillShutdown( IOOptionBits specifier )
 
 
 
-void					
-IOUSBControllerV3::PM_idle_timer_expiration ( void )
-{
-	USBLog(2, "AppleUSBUHCI[%p]::PM_idle_timer_expiration", this);
-	IOService::PM_idle_timer_expiration();
-}
-
-
-
 void
 IOUSBControllerV3::free()
 {
@@ -742,11 +733,13 @@ IOUSBControllerV3::CheckPowerModeBeforeGatedCall(char *fromStr)
 			// we are not on the thread, but we are about to be. In that case, sleep the running thread until we wake up
 			while ( (_myPowerState != kUSBPowerStateOn) and (retries-- > 0) )
 			{
+#if 0
 				char*		bt[8];
 				
 				OSBacktrace((void**)bt, 8);
 				
 				USBLog(4, "IOUSBControllerV3(%s)[%p]::CheckPowerModeBeforeGatedCall - call (%s) while _myPowerState(%d) _controllerAvailable(%s) _powerStateChangingTo(%d) - sleeping thread, bt:[%p][%p][%p][%p][%p][%p][%p]", getName(), this, fromStr, (int)_myPowerState, _controllerAvailable ? "true" : "false", (int)_powerStateChangingTo, bt[1], bt[2], bt[3], bt[4], bt[5], bt[6], bt[7]);
+#endif
 				IOSleep(10);
 			}
 		}
@@ -768,7 +761,7 @@ IOUSBControllerV3::DoEnableAddressEndpoints(OSObject *owner, void *arg0, void *a
 {
     IOUSBControllerV3 *me = (IOUSBControllerV3 *)owner;
 	
-    return me->UIMEnableAddressEndpoints((USBDeviceAddress)(UInt32)arg0, (bool)(UInt32) arg1);
+    return me->UIMEnableAddressEndpoints((USBDeviceAddress)(uintptr_t)arg0, (bool)(uintptr_t) arg1);
 }
 
 
@@ -778,7 +771,7 @@ IOUSBControllerV3::EnableAddressEndpoints(USBDeviceAddress address, bool enable)
 {
 	IOCommandGate * 	commandGate = GetCommandGate();
 	
-    return commandGate->runAction(DoEnableAddressEndpoints, (void*)(UInt32)address, (void*)enable);
+    return commandGate->runAction(DoEnableAddressEndpoints, (void*)(uintptr_t)address, (void*)enable);
 }
 
 
@@ -788,7 +781,7 @@ IOUSBControllerV3::DoEnableAllEndpoints(OSObject *owner, void *arg0, void *arg1,
 {
     IOUSBControllerV3 *me = (IOUSBControllerV3 *)owner;
 	
-    return me->UIMEnableAllEndpoints((bool)(UInt32)arg0);
+    return me->UIMEnableAllEndpoints((bool)(uintptr_t)arg0);
 }
 
 
@@ -1265,7 +1258,10 @@ IOUSBControllerV3::AcquireDeviceZero( void )
 	
 	kr = CheckPowerModeBeforeGatedCall( (char *) "AcquireDeviceZero");
 	if ( kr != kIOReturnSuccess )
+	{
+		USBError(1, "IOUSBControllerV3(%s)[%p]::AcquireDeviceZero - CheckPowerModeBeforeGatedCall returned 0x%x", getName(), this, kr);
 		return kr;
+	}
 
 	return IOUSBController::AcquireDeviceZero();
 }

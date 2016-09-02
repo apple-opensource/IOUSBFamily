@@ -288,17 +288,17 @@ IOUSBController::Read(IOMemoryDescriptor *buffer, USBDeviceAddress address, Endp
     IOUSBCompletion 	nullCompletion;
     int					i;
 
-    USBLog(7, "%s[%p]::Read - reqCount = %ld", getName(), this, reqCount);
+    USBLog(7, "%s[%p]::Read - reqCount = %qd", getName(), this, (uint64_t)reqCount);
     // Validate its a inny pipe and that there is a buffer
     if ((endpoint->direction != kUSBIn) || !buffer || (buffer->getLength() < reqCount))
     {
-        USBLog(2, "%s[%p]::Read - direction is not kUSBIn (%d), No Buffer, or buffer length < reqCount (%ld < %ld). Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->direction,  buffer->getLength(), reqCount, kIOReturnBadArgument);
+        USBLog(2, "%s[%p]::Read - direction is not kUSBIn (%d), No Buffer, or buffer length < reqCount (%qd < %qd). Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->direction,  (uint64_t)buffer->getLength(), (uint64_t)reqCount, kIOReturnBadArgument);
 		return kIOReturnBadArgument;
     }
     
     if ((endpoint->transferType != kUSBBulk) && (noDataTimeout || completionTimeout))
     {
-        USBLog(2, "%s[%p]::Read - Pipe is NOT kUSBBulk (%d) AND specified a timeout (%ld, %ld).  Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->transferType, noDataTimeout, completionTimeout, kIOReturnBadArgument);
+        USBLog(2, "%s[%p]::Read - Pipe is NOT kUSBBulk (%d) AND specified a timeout (%d, %d).  Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->transferType, (uint32_t)noDataTimeout, (uint32_t)completionTimeout, kIOReturnBadArgument);
 		return kIOReturnBadArgument; // timeouts only on bulk pipes
     }
     
@@ -370,7 +370,7 @@ IOUSBController::Read(IOMemoryDescriptor *buffer, USBDeviceAddress address, Endp
 
 	// Set up a flag indicating that we have a synchronous request in this command
 	//
-    if (  (UInt32) completion->action == (UInt32) &IOUSBSyncCompletion )
+    if ( completion->action == &IOUSBSyncCompletion )
 		command->SetIsSyncTransfer(true);
 	else
 		command->SetIsSyncTransfer(false);
@@ -387,6 +387,8 @@ IOUSBController::Read(IOMemoryDescriptor *buffer, USBDeviceAddress address, Endp
     command->SetClientCompletion(*completion);
     command->SetNoDataTimeout(noDataTimeout);
     command->SetCompletionTimeout(completionTimeout);
+	command->SetMultiTransferTransaction(false);
+	command->SetFinalTransferInTransaction(false);
     for (i=0; i < 10; i++)
 		command->SetUIMScratch(i, 0);
 	
@@ -482,18 +484,18 @@ IOUSBController::Write(IOMemoryDescriptor *buffer, USBDeviceAddress address, End
     IOUSBCompletion			nullCompletion;
     int						i;
 
-    USBLog(7, "%s[%p]::Write - reqCount = %ld", getName(), this, reqCount);
+    USBLog(7, "%s[%p]::Write - reqCount = %qd", getName(), this, (uint64_t)reqCount);
     
     // Validate its a outty pipe and that we have a buffer
     if((endpoint->direction != kUSBOut) || !buffer || (buffer->getLength() < reqCount))
     {
-        USBLog(5, "%s[%p]::Write - direction is not kUSBOut (%d), No Buffer, or buffer length < reqCount (%ld < %ld). Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->direction,  buffer->getLength(), reqCount, kIOReturnBadArgument);
+        USBLog(5, "%s[%p]::Write - direction is not kUSBOut (%d), No Buffer, or buffer length < reqCount (%qd < %qd). Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->direction,  (uint64_t)buffer->getLength(), (uint64_t)reqCount, kIOReturnBadArgument);
 		return kIOReturnBadArgument;
     }
 
     if ((endpoint->transferType != kUSBBulk) && (noDataTimeout || completionTimeout))
     {
-        USBLog(5, "%s[%p]::Write - Pipe is NOT kUSBBulk (%d) AND specified a timeout (%ld, %ld).  Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->transferType, noDataTimeout, completionTimeout, kIOReturnBadArgument);
+        USBLog(5, "%s[%p]::Write - Pipe is NOT kUSBBulk (%d) AND specified a timeout (%d, %d).  Returning kIOReturnBadArgument(0x%x)", getName(), this, endpoint->transferType, (uint32_t)noDataTimeout, (uint32_t)completionTimeout, kIOReturnBadArgument);
 		return kIOReturnBadArgument;							// timeouts only on bulk pipes
     }
 	
@@ -559,7 +561,7 @@ IOUSBController::Write(IOMemoryDescriptor *buffer, USBDeviceAddress address, End
 	
 	// Set up a flag indicating that we have a synchronous request in this command
 	//
-    if (  (UInt32) completion->action == (UInt32) &IOUSBSyncCompletion )
+    if ( completion->action == &IOUSBSyncCompletion )
 		command->SetIsSyncTransfer(true);
 	else
 		command->SetIsSyncTransfer(false);
@@ -576,6 +578,8 @@ IOUSBController::Write(IOMemoryDescriptor *buffer, USBDeviceAddress address, End
     command->SetClientCompletion(*completion);
     command->SetNoDataTimeout(noDataTimeout); 
     command->SetCompletionTimeout(completionTimeout);
+	command->SetMultiTransferTransaction(false);
+	command->SetFinalTransferInTransaction(false);
     for (i=0; i < 10; i++)
 		command->SetUIMScratch(i, 0);
 
@@ -703,23 +707,11 @@ IOUSBController::IsocIO(IOMemoryDescriptor *				buffer,
 		return kIOReturnNoResources;
 	}
 
-	//USBLog(1, "%s[%p]::IsocIO preparing memory descriptor (%p)", getName(), this, buffer);
-	// buffer->retain();					// should i do this?
-	// err = buffer->prepare();				// should i do this?
-	if (0) // if (err)
-	{
-		USBLog(3,"%s[%p]::IsocIO err (%p) trying to prepare buffer (%p)", getName(), this, (void*)err, buffer);
-		_freeUSBIsocCommandPool->returnCommand(command);
-		buffer->release();
-		return err;
-	}
 	USBLog(7, "%s[%p]::IsocIO - putting buffer (%p) into dmaCommand (%p) which has getMemoryDescriptor (%p)", getName(), this, buffer, command->GetDMACommand(), command->GetDMACommand()->getMemoryDescriptor());
 	err = dmaCommand->setMemoryDescriptor(buffer);								// this automatically calls prepare()
 	if (err)
 	{
 		USBLog(1, "%s[%p]::IsocIO - dmaCommand[%p]->setMemoryDescriptor(%p) failed with status (%p)", getName(), this, command->GetDMACommand(), buffer, (void*)err);
-		// buffer->complete();				// should i do this?
-		//buffer->release();				// should i do this?
 		_freeUSBIsocCommandPool->returnCommand(command);
 		return err;
 	}
@@ -729,7 +721,7 @@ IOUSBController::IsocIO(IOMemoryDescriptor *				buffer,
 	
 	// Set up a flag indicating that we have a synchronous request in this command
 	//
-    if ( (UInt32)completion->action == (UInt32) &IOUSBSyncIsoCompletion )
+    if ( completion->action == &IOUSBSyncIsoCompletion )
 		syncTransfer = true;
 		
 	command->SetIsSyncTransfer(syncTransfer);
@@ -758,6 +750,22 @@ IOUSBController::IsocIO(IOMemoryDescriptor *				buffer,
 	command->SetLowLatency(false);
 
 	err = _commandGate->runAction(DoIsocTransfer, command);
+
+	// If we have a sync request, then we always return the command after the DoIsocTransfer.  If it's an async request, we only return it if 
+	// we get an immediate error
+	//
+	if ( syncTransfer || (kIOReturnSuccess != err) )
+	{
+		IODMACommand		*dmaCommand = command->GetDMACommand();
+		IOMemoryDescriptor	*memDesc = dmaCommand ? (IOMemoryDescriptor *)dmaCommand->getMemoryDescriptor() : NULL;
+		
+		if (memDesc)
+		{
+			USBLog(7, "%s[%p]::IsocIO - sync xfer or err return - clearing memory descriptor (%p) from dmaCommand (%p)", getName(), this, memDesc, dmaCommand);
+			dmaCommand->clearMemoryDescriptor();
+		}
+		_freeUSBIsocCommandPool->returnCommand(command);
+	}
 
     return err;
 }
@@ -834,23 +842,11 @@ IOUSBController::IsocIO(IOMemoryDescriptor *			buffer,
 		return kIOReturnNoResources;
 	}
 	
-	//USBLog(1, "%s[%p]::IsocIO(LL) preparing memory descriptor (%p)", getName(), this, buffer);
-	// buffer->retain();						// should i do this?
-	// err = buffer->prepare();					// should i do this?
-	if (0) // if (err)
-	{
-		USBLog(3,"%s[%p]::IsocIO(LL) err (%p) trying to prepare buffer (%p)", getName(), this, (void*)err, buffer);
-		_freeUSBIsocCommandPool->returnCommand(command);
-		buffer->release();
-		return err;
-	}
 	USBLog(7, "%s[%p]::IsocIO(LL) - putting buffer %p into dmaCommand %p which has getMemoryDescriptor %p", getName(), this, buffer, command->GetDMACommand(), command->GetDMACommand()->getMemoryDescriptor());
 	err = dmaCommand->setMemoryDescriptor(buffer);								// this automatically calls prepare()
 	if (err)
 	{
 		USBLog(1, "%s[%p]::IsocIO(LL) - dmaCommand[%p]->setMemoryDescriptor(%p) failed with status (%p)", getName(), this, command->GetDMACommand(), buffer, (void*)err);
-		// buffer->complete();					// should i do this?
-		// buffer->release();					// should i do this?
 		_freeUSBIsocCommandPool->returnCommand(command);
 		return err;
 	}
@@ -860,7 +856,7 @@ IOUSBController::IsocIO(IOMemoryDescriptor *			buffer,
 	
 	// Set up a flag indicating that we have a synchronous request in this command
 	//
-    if ( (UInt32)completion->action == (UInt32) &IOUSBSyncIsoCompletion )
+    if ( (uintptr_t)completion->action == (uintptr_t) &IOUSBSyncIsoCompletion )
 		syncTransfer = true;
 		
 	command->SetIsSyncTransfer(syncTransfer);
@@ -891,6 +887,22 @@ IOUSBController::IsocIO(IOMemoryDescriptor *			buffer,
 
 	err = _commandGate->runAction(DoIsocTransfer, command);
 	
+	// If we have a sync request, then we always return the command after the DoIsocTransfer.  If it's an async request, we only return it if 
+	// we get an immediate error
+	//
+	if ( syncTransfer || (kIOReturnSuccess != err) )
+	{
+		IODMACommand		*dmaCommand = command->GetDMACommand();
+		IOMemoryDescriptor	*memDesc = dmaCommand ? (IOMemoryDescriptor	*)dmaCommand->getMemoryDescriptor() : NULL;
+		
+		if (memDesc)
+		{
+			USBLog(7, "%s[%p]::IsocIO(LL) - sync xfer or err return - clearing memory descriptor (%p) from dmaCommand (%p)", getName(), this, memDesc, dmaCommand);
+			dmaCommand->clearMemoryDescriptor();
+		}
+		_freeUSBIsocCommandPool->returnCommand(command);
+	}
+
     return err;
 }
 

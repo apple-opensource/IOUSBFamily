@@ -22,6 +22,13 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+
+//================================================================================================
+//
+//   Headers
+//
+//================================================================================================
+//
 #include <libkern/OSByteOrder.h>
 
 #include <IOKit/IOLib.h>
@@ -39,11 +46,25 @@
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <libkern/libkern.h>
 
+#include "AppleUSBEHCI.h"
+
+//================================================================================================
+//
+//   Local Definitions
+//
+//================================================================================================
+//
+#define super IOUSBControllerV3
+
+#define _controllerCanSleep				_expansionData->_controllerCanSleep
+
 #ifndef kACPIDevicePathKey
-#define kACPIDevicePathKey			"acpi-path"
+	#define kACPIDevicePathKey			"acpi-path"
 #endif
 
-#include "AppleUSBEHCI.h"
+#ifndef kIOPCIPMEOptionsKey
+	#define kIOPCIPMEOptionsKey			"IOPCIPMEOptions"
+#endif
 
 // From the file Gossamer.h that is not available
 enum {
@@ -55,28 +76,47 @@ enum {
     kGossamerType101
 };
 
-// Convert USBLog to use kprintf debugging
-// The switch is in the header file, but the work is done here because the header is included by the companion controllers
+
+//================================================================================================
+//
+//   kprintf logging
+//
+//	Convert USBLog to use kprintf debugging
+//	The switch is in the header file, but the work is done here because the header is included by the companion controllers
+//
+//================================================================================================
+//
 #if EHCI_USE_KPRINTF
-#define EHCIPWRMGMT_USE_KPRINTF EHCI_USE_KPRINTF
+	#define EHCIPWRMGMT_USE_KPRINTF EHCI_USE_KPRINTF
 #else
-#define EHCIPWRMGMT_USE_KPRINTF 0
+	#define EHCIPWRMGMT_USE_KPRINTF 0
 #endif
+
 #if EHCIPWRMGMT_USE_KPRINTF
-#undef USBLog
-#undef USBError
-void kprintf(const char *format, ...)
-__attribute__((format(printf, 1, 2)));
-#define USBLog( LEVEL, FORMAT, ARGS... )  if ((LEVEL) <= EHCIPWRMGMT_USE_KPRINTF) { kprintf( FORMAT "\n", ## ARGS ) ; }
-#define USBError( LEVEL, FORMAT, ARGS... )  { kprintf( FORMAT "\n", ## ARGS ) ; }
+	#undef USBLog
+	#undef USBError
+	void kprintf(const char *format, ...) __attribute__((format(printf, 1, 2)));
+	#define USBLog( LEVEL, FORMAT, ARGS... )  if ((LEVEL) <= EHCIPWRMGMT_USE_KPRINTF) { kprintf( FORMAT "\n", ## ARGS ) ; }
+	#define USBError( LEVEL, FORMAT, ARGS... )  { kprintf( FORMAT "\n", ## ARGS ) ; }
 #endif
 
-#define super IOUSBControllerV3
 
+//================================================================================================
+//
+//   externals
+//
+//================================================================================================
+//
 extern UInt32 getPortSCForWriting(EHCIRegistersPtr _pEHCIRegisters, short port);
 
-#define _controllerCanSleep				_expansionData->_controllerCanSleep
 
+
+//================================================================================================
+//
+//   CheckSleepCapability
+//
+//================================================================================================
+//
 void											
 AppleUSBEHCI::CheckSleepCapability(void)
 {
@@ -87,6 +127,7 @@ AppleUSBEHCI::CheckSleepCapability(void)
 	// assume that sleep is OK at first
 	USBLog(2, "AppleUSBEHCI[%p]::CheckSleepCapability - assuming that I can sleep", this);
 	_controllerCanSleep = true;
+	_hasPCIPwrMgmt = false;
 	
 	//   We need to determine which EHCI controllers don't survive sleep.  These fall into 2 categories:
 	//
@@ -108,35 +149,43 @@ AppleUSBEHCI::CheckSleepCapability(void)
 	//
 	if ( !_device->getProperty("AAPL,clock-id") && !((getPlatform()->getChipSetType() == kChipSetTypeGossamer) && getPlatform()->getMachineType() == kGossamerTypeYosemite) )
 	{
-		bool			hasSupport = false;
-		
-		// ICH6 is only in the Developer Transition machines, and we will assume that it can support D3Cold
-		if (_errataBits & kErrataICH6PowerSequencing)
-			hasSupport = _device->hasPCIPowerManagement(kPCIPMCPMESupportFromD3Cold);
-		else
-			hasSupport = _device->hasPCIPowerManagement();
-		
-		if (hasSupport)
+		if (_device->getProperty("built-in"))
 		{
-			if (_errataBits & kErrataICH6PowerSequencing)
-				hasSupport = (_device->enablePCIPowerManagement(kPCIPMCPMESupportFromD3Cold) == kIOReturnSuccess);
-			else
-				hasSupport = (_device->enablePCIPowerManagement() == kIOReturnSuccess);
-		}
-		if (hasSupport)
-		{
-			_hasPCIPwrMgmt = true;
-			setProperty("Card Type","Built-in");
+			// rdar://5769508 - if we are on a built in PCI device, then assume the system supports D3cold
+			if (_device->hasPCIPowerManagement(kPCIPMCPMESupportFromD3Cold))
+			{
+				_device->setProperty(kIOPCIPMEOptionsKey, kOSBooleanTrue);
+				if (_device->enablePCIPowerManagement(kPCIPMCSPowerStateD3) == kIOReturnSuccess)
+				{
+					_hasPCIPwrMgmt = true;
+					setProperty("Card Type","Built-in");
+				}
+			}
 		}
 		else
 		{
-			USBLog(2, "AppleUSBEHCI[%p]::CheckSleepCapability EHCI controller will be unloaded across sleep",this);
-			_controllerCanSleep = false;
-			setProperty("Card Type","PCI");
+			// rdar://5856545 - on older machines without the built-in property, we need to use the "default" case in the IOPCIDevice code
+			if (_device->hasPCIPowerManagement())
+			{
+				_device->setProperty(kIOPCIPMEOptionsKey, kOSBooleanTrue);
+				if (_device->enablePCIPowerManagement() == kIOReturnSuccess)
+				{
+					_hasPCIPwrMgmt = true;
+					setProperty("Card Type","Built-in");
+				}
+			}
 		}
+		
+        if (!_hasPCIPwrMgmt)
+        {
+            USBError(1, "AppleUSBOHCI[%p]::CheckSleepCapability - controller will be unloaded across sleep",this);
+            _controllerCanSleep = false;
+            setProperty("Card Type","PCI");
+        }
 	}
 	else
 	{
+		// old Apple ASICs come in here
 		setProperty("Card Type","Built-in");
 	}
 	
@@ -154,7 +203,12 @@ AppleUSBEHCI::CheckSleepCapability(void)
 }
 
 
-
+//================================================================================================
+//
+//   ResumeUSBBus
+//
+//================================================================================================
+//
 void			
 AppleUSBEHCI::ResumeUSBBus()
 {
@@ -251,7 +305,12 @@ AppleUSBEHCI::ResumeUSBBus()
 }
 
 
-
+//================================================================================================
+//
+//   SuspendUSBBus
+//
+//================================================================================================
+//
 void			
 AppleUSBEHCI::SuspendUSBBus()
 {
@@ -386,7 +445,12 @@ AppleUSBEHCI::SuspendUSBBus()
 }
 
 
-
+//================================================================================================
+//
+//   StopUSBBus
+//
+//================================================================================================
+//
 void			
 AppleUSBEHCI::StopUSBBus()
 {
@@ -403,6 +467,12 @@ AppleUSBEHCI::StopUSBBus()
 
 
 
+//================================================================================================
+//
+//   RestartUSBBus
+//
+//================================================================================================
+//
 void			
 AppleUSBEHCI::RestartUSBBus()
 {
@@ -422,6 +492,12 @@ AppleUSBEHCI::RestartUSBBus()
 
 
 
+//================================================================================================
+//
+//   CopyACPIDevice
+//
+//================================================================================================
+//
 static IOACPIPlatformDevice * CopyACPIDevice( IORegistryEntry * device )
 {
 	IOACPIPlatformDevice *  acpiDevice = 0;
@@ -453,6 +529,12 @@ static IOACPIPlatformDevice * CopyACPIDevice( IORegistryEntry * device )
 	return (acpiDevice);
 }
 
+//================================================================================================
+//
+//   HasExpressCardUSB
+//
+//================================================================================================
+//
 static bool HasExpressCardUSB( IORegistryEntry * acpiDevice, UInt32 * portnum )
 {
 	const IORegistryPlane *	acpiPlane;
@@ -506,8 +588,14 @@ static bool HasExpressCardUSB( IORegistryEntry * acpiDevice, UInt32 * portnum )
 	return match;
 }
 
-// Checks for ExpressCard connected to this controller, and returns the port number (1 based)
-// Will return 0 if no ExpressCard is connected to this controller.
+//================================================================================================
+//
+//   HasExpressCardUSB
+//
+//	Checks for ExpressCard connected to this controller, and returns the port number (1 based)
+//	Will return 0 if no ExpressCard is connected to this controller.
+//
+//================================================================================================
 //
 UInt32 
 AppleUSBEHCI::ExpressCardPort( IOService * provider )
@@ -526,7 +614,12 @@ AppleUSBEHCI::ExpressCardPort( IOService * provider )
 }
 
 
-
+//================================================================================================
+//
+//   powerStateDidChangeTo
+//
+//================================================================================================
+//
 IOReturn
 AppleUSBEHCI::powerStateDidChangeTo ( IOPMPowerFlags capabilities, unsigned long stateNumber, IOService* whatDevice)
 {
@@ -544,7 +637,12 @@ AppleUSBEHCI::powerStateDidChangeTo ( IOPMPowerFlags capabilities, unsigned long
 }
 
 
-
+//================================================================================================
+//
+//   SaveControllerStateForSleep
+//
+//================================================================================================
+//
 IOReturn				
 AppleUSBEHCI::SaveControllerStateForSleep(void)
 {
@@ -570,12 +668,16 @@ AppleUSBEHCI::SaveControllerStateForSleep(void)
 	_myBusState = kUSBBusStateSuspended;
 
 	showRegisters(7, "-SaveControllerStateForSleep");
-
 	return kIOReturnSuccess;
 }
 
 
-
+//================================================================================================
+//
+//   RestoreControllerStateFromSleep
+//
+//================================================================================================
+//
 IOReturn				
 AppleUSBEHCI::RestoreControllerStateFromSleep(void)
 {
@@ -585,12 +687,47 @@ AppleUSBEHCI::RestoreControllerStateFromSleep(void)
 
 	// at this point, interrupts are disabled, and we are waking up. If the Port Change interrupt is active
 	// then it is likely that we are responsible for the system issuing the wakeup
-	if (USBToHostLong(_pEHCIRegisters->USBSTS) & kEHCIPortChangeIntBit)
+	if ((USBToHostLong(_pEHCIRegisters->USBSTS) & kEHCIPortChangeIntBit) || (_errataBits & kErrataMissingPortChangeInt))
 	{
 		UInt32			port, numPorts;
 		
-		IOLog("\nUSB caused wake event (EHCI)\n");
-		kprintf("\nUSB caused wake event (EHCI)\n");
+		// just have this be done per port..
+		// IOLog("\nUSB caused wake event (EHCI @ 0x%x)\n", (uint32_t)_busNumber);
+		numPorts = USBToHostLong(_pEHCICapRegisters->HCSParams) & kEHCINumPortsMask;
+		for (port=0; port < numPorts; port++)
+		{
+			UInt32	portSC = USBToHostLong(_pEHCIRegisters->PortSC[port]);
+			if (portSC & kEHCIPortSC_ConnectChange)
+			{
+				if (portSC & kEHCIPortSC_Enabled)
+				{
+					USBError(1, "USB (EHCI):Port %d on bus 0x%x - connect status changed but still enabled. clearing enable bit: portSC(%p)\n", (int)port+1, (uint32_t)_busNumber, (void*)portSC);
+					portSC = getPortSCForWriting(_pEHCIRegisters, port+1);
+					portSC &= ~kEHCIPortSC_Enabled;
+					_pEHCIRegisters->PortSC[port] = HostToUSBLong(portSC);
+				}
+				else
+				{
+					IOLog("USB (EHCI):Port %d on bus 0x%x connected or disconnected: portSC(%p)\n", (int)port+1, (uint32_t)_busNumber, (void*)portSC);
+				}
+			}
+			else if (portSC & kEHCIPortSC_Resume)
+			{
+				IOLog("\tUSB (EHCI):Port %d on bus 0x%x has remote wakeup from some device\n", (int)port+1, (uint32_t)_busNumber);
+				if ((_errataBits & kErrataMissingPortChangeInt) && !_portChangeInterrupt && !(USBToHostLong(_pEHCIRegisters->USBSTS) & kEHCIPortChangeIntBit))
+				{
+					USBLog(2, "AppleUSBEHCI[%p]::RestoreControllerStateFromSleep - reclaiming missing Port Change interrupt for port %d",  this, (int)port+1);
+					_portChangeInterrupt = kEHCIPortChangeIntBit;
+				}
+			}
+			else if ((portSC & kEHCIPortSC_Enabled) && !(portSC & kEHCIPortSC_Suspend))
+			{
+				USBError(1, "USB (EHCI):Port %d on bus 0x%x - port enabled but not suspended.  clearing enable bit: portSC(%p)\n", (int)port+1, (uint32_t)_busNumber, (void*)portSC);
+				portSC = getPortSCForWriting(_pEHCIRegisters, port+1);
+				portSC &= ~kEHCIPortSC_Enabled;
+				_pEHCIRegisters->PortSC[port] = HostToUSBLong(portSC);
+			}
+		}
 	}
 	
 	USBLog(7, "AppleUSBEHCI[%p]::RestoreControllerStateFromSleep - about to resume bus - showing queue", this);
@@ -602,12 +739,16 @@ AppleUSBEHCI::RestoreControllerStateFromSleep(void)
 	
 	showRegisters(7, "-RestoreControllerStateFromSleep");
 	
-	// interrupts will be enabled in the superclass
 	return kIOReturnSuccess;
 }
 
 
-
+//================================================================================================
+//
+//   ResetControllerState
+//
+//================================================================================================
+//
 IOReturn
 AppleUSBEHCI::ResetControllerState(void)
 {
@@ -648,7 +789,12 @@ AppleUSBEHCI::ResetControllerState(void)
 }
 
 
-
+//================================================================================================
+//
+//   RestartControllerFromReset
+//
+//================================================================================================
+//
 IOReturn
 AppleUSBEHCI::RestartControllerFromReset(void)
 {
@@ -680,7 +826,7 @@ AppleUSBEHCI::RestartControllerFromReset(void)
 	
 	if (_pEHCIRegisters->AsyncListAddr != _savedAsyncListAddr)
 	{
-		USBLog(5, "AppleUSBEHCI[%p]::RestartControllerFromReset - restoring AsyncListAddr[from 0x%lx to 0x%lx]",  this, _pEHCIRegisters->AsyncListAddr, _savedAsyncListAddr);
+		USBLog(5, "AppleUSBEHCI[%p]::RestartControllerFromReset - restoring AsyncListAddr[from 0x%x to 0x%x]",  this, (uint32_t)_pEHCIRegisters->AsyncListAddr, (uint32_t)_savedAsyncListAddr);
 		_pEHCIRegisters->AsyncListAddr = _savedAsyncListAddr;
 		IOSync();
 	}
@@ -737,6 +883,12 @@ AppleUSBEHCI::RestartControllerFromReset(void)
 
 
 
+//================================================================================================
+//
+//   DozeController
+//
+//================================================================================================
+//
 IOReturn
 AppleUSBEHCI::DozeController(void)
 {
@@ -756,6 +908,12 @@ AppleUSBEHCI::DozeController(void)
 
 
 
+//================================================================================================
+//
+//   WakeControllerFromDoze
+//
+//================================================================================================
+//
 IOReturn				
 AppleUSBEHCI::WakeControllerFromDoze(void)
 {
@@ -765,11 +923,41 @@ AppleUSBEHCI::WakeControllerFromDoze(void)
 
 
 
+//================================================================================================
+//
+//   EnableInterruptsFromController
+//
+//================================================================================================
+//
 IOReturn
 AppleUSBEHCI::EnableInterruptsFromController(bool enable)
 {
+	bool		armSecondaryInterrupt = false;
+	
 	if (enable)
 	{
+		if ((_errataBits & kErrataMissingPortChangeInt) && _portChangeInterrupt)
+		{
+			UInt32  sts = USBToHostLong(_pEHCIRegisters->USBSTS);
+			UInt32  intr = USBToHostLong(_pEHCIRegisters->USBIntr);
+			
+			if (!(intr & kEHCIPortChangeIntBit))					// make sure interrupt is currently masked out
+			{
+				if (!(sts & kEHCIPortChangeIntBit))
+				{
+					USBLog(2, "AppleUSBEHCI[%p]::EnableInterruptsFromController - arming for missed port change interrupt", this);
+					armSecondaryInterrupt = true;
+				}
+				else
+				{
+					USBLog(2, "AppleUSBEHCI[%p]::EnableInterruptsFromController - no need to rearm for port change interrupt since is will arm itself", this);
+				}
+			}
+			else
+			{
+				USBLog(2, "AppleUSBEHCI[%p]::EnableInterruptsFromController - Port Change int unexpectedly armed in USBIntr register", this);
+			}
+		}
 		USBLog(5, "AppleUSBEHCI[%p]::EnableInterruptsFromController - enabling interrupts, USBIntr(%p) _savedUSBIntr(%p)", this, (void*)_pEHCIRegisters->USBIntr, (void*)HostToUSBLong(_savedUSBIntr));
 		_pEHCIRegisters->USBIntr = _savedUSBIntr;
 		IOSync();
@@ -783,11 +971,20 @@ AppleUSBEHCI::EnableInterruptsFromController(bool enable)
 		USBLog(5, "AppleUSBEHCI[%p]::EnableInterruptsFromController - interrupts disabled, _savedUSBIntr(%p)", this, (void*)_savedUSBIntr);
 	}
 	
+	if (armSecondaryInterrupt && _filterInterruptSource)
+		_filterInterruptSource->signalInterrupt();
+		
 	return kIOReturnSuccess;
 }
 
 
 
+//================================================================================================
+//
+//   powerChangeDone
+//
+//================================================================================================
+//
 void
 AppleUSBEHCI::powerChangeDone ( unsigned long fromState)
 {
@@ -796,8 +993,27 @@ AppleUSBEHCI::powerChangeDone ( unsigned long fromState)
 	USBLog((fromState == newState) ? 7 : 4, "AppleUSBEHCI[%p]::powerChangeDone from state (%d) to state (%d) _controllerAvailable(%s)", this, (int)fromState, (int)newState, _controllerAvailable ? "true" : "false");
 	if (_wakingFromHibernation)
 	{
-		USBLog(2, "AppleUSBEHCI[%p]::powerChangeDone - _wakingFromHibernation - _savedAsyncListAddr(%p) AsyncListAddr(%p)", this, (void*)USBToHostLong(_savedAsyncListAddr), (void*)_pEHCIRegisters->AsyncListAddr);		
+		USBLog(2, "AppleUSBEHCI[%p]::powerChangeDone - _wakingFromHibernation - _savedAsyncListAddr(%p) AsyncListAddr(%p) _AsyncHead(%p)", this, (void*)USBToHostLong(_savedAsyncListAddr), (void*)_pEHCIRegisters->AsyncListAddr, _AsyncHead);		
 		_savedAsyncListAddr = _pEHCIRegisters->AsyncListAddr;
+		// at this point, we expect _savedAsyncListAddr to be NULL, since when we are waking from hibernation the AsyncListAddr should be NULL (see the end of ResetControllerState)
+		if (_savedAsyncListAddr)
+		{
+			USBLog(1, "AppleUSBEHCI[%p]::powerChangeDone - _savedAsyncListAddr is NOT NULL (%p) - UNEXPECTED", this, (void*)_savedAsyncListAddr);
+			_savedAsyncListAddr = 0;
+		}
+		if (_AsyncHead)						// if all of the endpoints have not been aborted yet, then we need to throw them away
+		{
+			AppleEHCIQueueHead		*pQH = _AsyncHead;
+			USBError(1, "AppleUSBEHCI[%p]::powerChangeDone - waking from hibernation with some queue heads on the queue. UNEXPECTED", this);
+			while (pQH)
+			{
+				UInt32					flags = USBToHostLong(pQH->GetSharedLogical()->flags);
+				
+				USBLog(1, "AppleUSBEHCI[%p]::powerChangeDone - pQH(%p) ADDR(%d) EP(%d) DIR(%d) being throw away", this, pQH, (int)(flags & kEHCIEDFlags_FA), (int)((flags & kEHCIEDFlags_EN) >> kEHCIEDFlags_ENPhase), (int)pQH->_direction);
+				pQH = OSDynamicCast(AppleEHCIQueueHead, pQH->_logicalNext);
+			}
+			_AsyncHead = NULL;
+		}
 	}
 	if (_controllerAvailable)
 		showRegisters(7, "powerChangeDone");

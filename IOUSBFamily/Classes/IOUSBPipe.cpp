@@ -57,17 +57,39 @@
 #define kIOUserClientCrossEndianCompatibleKey "IOUserClientCrossEndianCompatible"
 #endif
 
-#define	_device				_expansionData->_device
-#define	_correctStatus		_expansionData->_correctStatus
-#define	_speed				_expansionData->_speed
-#define	_interface			_expansionData->_interface
+#define	_device							_expansionData->_device
+#define	_correctStatus					_expansionData->_correctStatus
+#define	_speed							_expansionData->_speed
+#define	_interface						_expansionData->_interface
 #define	_crossEndianCompatible			_expansionData->_crossEndianCompatible
 
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+// Note:  We are overloading the use of the _status iVar -- was obsoleted, but now use it to signify that
+// we should accept an illegal MPS.  We did not create a new ivar in the expansion data because we need
+// to check the property before the expansion data is allocated and we did not want to modify the params
+// and create another method.  We just reused an unused ivar, but we don't change the name so as not break
+// binary compatibility
+#define	_OUTOFSPECMPSOK				_status				// if non-zero, then we should ignore an out of spec MPS
 
+//================================================================================================
+#ifndef IOUSBPIPE_USE_KPRINTF
+	#define IOUSBPIPE_USE_KPRINTF 0
+#endif
+
+#if IOUSBPIPE_USE_KPRINTF
+	#undef USBLog
+	#undef USBError
+	void kprintf(const char *format, ...) __attribute__((format(printf, 1, 2)));
+	#define USBLog( LEVEL, FORMAT, ARGS... )  if ((LEVEL) <= IOUSBPIPE_USE_KPRINTF) { kprintf( FORMAT "\n", ## ARGS ) ; }
+	#define USBError( LEVEL, FORMAT, ARGS... )  { kprintf( FORMAT "\n", ## ARGS ) ; }
+#endif
+
+//================================================================================================
+//
+//  IOUSBPipe Methods
+//
+//================================================================================================
 OSDefineMetaClassAndStructors(IOUSBPipe, OSObject)
 
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 bool 
 IOUSBPipe::InitToEndpoint(const IOUSBEndpointDescriptor *ed, UInt8 speed, USBDeviceAddress address, IOUSBController * controller)
@@ -76,7 +98,7 @@ IOUSBPipe::InitToEndpoint(const IOUSBEndpointDescriptor *ed, UInt8 speed, USBDev
     
     if( !super::init() || ed == 0)
         return (false);
-
+	
     // allocate our expansion data
     if (!_expansionData)
     {
@@ -85,7 +107,7 @@ IOUSBPipe::InitToEndpoint(const IOUSBEndpointDescriptor *ed, UInt8 speed, USBDev
             return false;
         bzero(_expansionData, sizeof(ExpansionData));
     }
-
+	
     _controller = controller;
     _descriptor = ed;
     _endpoint.number = ed->bEndpointAddress & kUSBPipeIDMask;
@@ -93,20 +115,35 @@ IOUSBPipe::InitToEndpoint(const IOUSBEndpointDescriptor *ed, UInt8 speed, USBDev
     if(_endpoint.transferType == kUSBControl)
         _endpoint.direction = kUSBAnyDirn;
     else
-	_endpoint.direction = (ed->bEndpointAddress & 0x80) ? kUSBIn : kUSBOut;
+		_endpoint.direction = (ed->bEndpointAddress & 0x80) ? kUSBIn : kUSBOut;
     _endpoint.maxPacketSize = mungeMaxPacketSize(USBToHostWord(ed->wMaxPacketSize));
+	
     _endpoint.interval = ed->bInterval;
-    _status = 0;
     _address = address;
     _speed = speed;
+	
+	// Bring in workaround from the EHCI UIM for Bulk pipes that are high speed but report a MPS of 64:
+    if ( (_speed == kUSBDeviceSpeedHigh) && (_endpoint.transferType == kUSBBulk) && (_endpoint.maxPacketSize != 512) ) 
+    {	
+		if ( _OUTOFSPECMPSOK == 0 )
+		{
+			// This shouldn't happen any more, this has been fixed.
+			USBError(1, "IOUSBPipe[%p]::InitToEndpoint: USB 2.0 Spec (5.8.3) converting Bulk MPS from %d to 512", this, _endpoint.maxPacketSize);
+			_endpoint.maxPacketSize = 512;
+		}
+		else
+		{
+			USBLog(5, "IOUSBPipe[%p]::InitToEndpoint: High Speed Bulk pipe with %d MPS, but property says we should still use it.", this, _endpoint.maxPacketSize);
+		}
+    }
 	
     err = _controller->OpenPipe(_address, speed, &_endpoint);
     
     if ((err == kIOReturnNoBandwidth) && (_endpoint.transferType == kUSBIsoc))
     {
-	_endpoint.maxPacketSize = 0;
-	USBLog(2, "IOUSBPipe[%p]::InitToEndpoint - can't get bandwidth for full isoc pipe - creating 0 bandwidth pipe", this);
-	err = _controller->OpenPipe(_address, speed, &_endpoint);
+		_endpoint.maxPacketSize = 0;
+		USBLog(2, "IOUSBPipe[%p]::InitToEndpoint - can't get bandwidth for full isoc pipe - creating 0 bandwidth pipe", this);
+		err = _controller->OpenPipe(_address, speed, &_endpoint);
     }
     
     if( err != kIOReturnSuccess)
@@ -143,18 +180,44 @@ IOUSBPipe::ToEndpoint(const IOUSBEndpointDescriptor *ed, IOUSBDevice * device, I
 IOUSBPipe *
 IOUSBPipe::ToEndpoint(const IOUSBEndpointDescriptor *ed, IOUSBDevice * device, IOUSBController *controller, IOUSBInterface * interface)
 {
-    IOUSBPipe *me = new IOUSBPipe;
-    USBLog(6, "IOUSBPipe[%p]::ToEndpoint device %p", me, device);
+	OSObject *	propertyObj = NULL;
+	OSBoolean * boolObj = NULL;
+    
+	IOUSBPipe *	me = new IOUSBPipe;
+   
+	if ( me == NULL )
+	{
+		USBLog(1, "IOUSBPipe::ToEndpoint  could not allocate IOUSBPIPE object for device %p, interface %p", device, interface);
+		return NULL;
+	}
 	
-    if ( me && !me->InitToEndpoint(ed, device->GetSpeed(), device->GetAddress(), controller) ) 
+	USBLog(6, "IOUSBPipe[%p]::ToEndpoint device %p, interface %p", me, device, interface);
+	
+	if ( me && interface)
+	{
+		// If our interface has the CrossEndianCompatible property, set our boolean
+		propertyObj = interface->copyProperty(kUSBOutOfSpecMPSOK);
+		boolObj = OSDynamicCast( OSBoolean, propertyObj );
+		if ( boolObj && boolObj->isTrue())
+		{
+			USBLog(6,"IOUSBPipe[%p]::ToEndpoint Device reports Out of spec MPS property and is TRUE", me);
+			me->_OUTOFSPECMPSOK = 0xFF;
+		}
+		
+		if (propertyObj)
+			propertyObj->release();
+	}
+
+  if ( !me->InitToEndpoint(ed, device->GetSpeed(), device->GetAddress(), controller) ) 
     {
         me->release();
         return NULL;
     }
-    me->_device = device;
+
+	me->_device = device;
 	me->_interface = interface;
 
-    if ( me->_interface )
+	if ( me->_interface )
     {
         // If our interface has the CrossEndianCompatible property, set our boolean
 		OSObject * propertyObj = me->_interface->copyProperty(kIOUserClientCrossEndianCompatibleKey);
@@ -291,7 +354,8 @@ IOUSBPipe::Read(IOMemoryDescriptor * buffer, UInt64 frameStart, UInt32 numFrames
         tap.action = &IOUSBSyncIsoCompletion;
         tap.parameter = NULL;
 
-        err = _controller->IsocIO(buffer, frameStart, numFrames, pFrames, _address, &_endpoint, &tap);
+		USBLog(3, "IOUSBPipe[%p]::Read Sync (Isoc) completion: %p", this, tap.action);
+		err = _controller->IsocIO(buffer, frameStart, numFrames, pFrames, _address, &_endpoint, &tap);
 
     }
     else
@@ -343,6 +407,7 @@ IOUSBPipe::Write(IOMemoryDescriptor * buffer, UInt64 frameStart, UInt32 numFrame
         tap.action = &IOUSBSyncIsoCompletion;
         tap.parameter = NULL;
 
+        USBLog(3, "IOUSBPipe[%p]::Write Sync (Isoc) completion: %p", this, tap.action);
         err = _controller->IsocIO(buffer, frameStart, numFrames, pFrames, _address, &_endpoint, &tap);
 
     }
@@ -581,16 +646,16 @@ IOUSBPipe::Read(IOMemoryDescriptor *buffer, UInt32 noDataTimeout, UInt32 complet
 {
     IOReturn	err = kIOReturnSuccess;
 
-    USBLog(7, "IOUSBPipe[%p]::Read #3 (addr %d:%d type %d) - reqCount = %ld", this, _address, _endpoint.number , _endpoint.transferType, reqCount);
+    USBLog(7, "IOUSBPipe[%p]::Read #3 (addr %d:%d type %d) - reqCount = %qd", this, _address, _endpoint.number , _endpoint.transferType, (uint64_t)reqCount);
     if ((_endpoint.transferType != kUSBBulk) && (noDataTimeout || completionTimeout))
     {
-        USBLog(5, "IOUSBPipe[%p]::Read - bad arguments:  (EP type: %d != kUSBBulk(%d)) && ( dataTimeout: %ld || completionTimeout: %ld)", this, _endpoint.transferType, kUSBBulk, noDataTimeout, completionTimeout);
+        USBLog(5, "IOUSBPipe[%p]::Read - bad arguments:  (EP type: %d != kUSBBulk(%d)) && ( dataTimeout: %d || completionTimeout: %d)", this, _endpoint.transferType, kUSBBulk, (uint32_t)noDataTimeout, (uint32_t)completionTimeout);
 		return kIOReturnBadArgument;
     }
 
     if (!buffer || (buffer->getLength() < reqCount))
     {
-        USBLog(5, "IOUSBPipe[%p]::Write - bad buffer: (buffer %p) || ( length %ld < reqCount %ld)", this, buffer, buffer->getLength(), reqCount);
+        USBLog(5, "IOUSBPipe[%p]::Write - bad buffer: (buffer %p) || ( length %qd < reqCount %qd)", this, buffer, buffer ? (uint64_t)buffer->getLength() : 0, (uint64_t)reqCount);
         return kIOReturnBadArgument;
     }
 
@@ -653,16 +718,16 @@ IOUSBPipe::Write(IOMemoryDescriptor *buffer, UInt32 noDataTimeout, UInt32 comple
 {
     IOReturn	err = kIOReturnSuccess;
 
-    USBLog(7, "IOUSBPipe[%p]::Write #3 (addr %d:%d type %d) - reqCount = %ld", this, _address, _endpoint.number , _endpoint.transferType, reqCount);
+    USBLog(7, "IOUSBPipe[%p]::Write #3 (addr %d:%d type %d) - reqCount = %qd", this, _address, _endpoint.number , _endpoint.transferType, (uint64_t)reqCount);
     if ((_endpoint.transferType != kUSBBulk) && (noDataTimeout || completionTimeout))
     {
-        USBLog(5, "IOUSBPipe[%p]::Write - bad arguments:  (EP type: %d != kUSBBulk(%d)) && ( dataTimeout: %ld || completionTimeout: %ld)", this, _endpoint.transferType, kUSBBulk, noDataTimeout, completionTimeout);
+        USBLog(5, "IOUSBPipe[%p]::Write - bad arguments:  (EP type: %d != kUSBBulk(%d)) && ( dataTimeout: %d || completionTimeout: %d)", this, _endpoint.transferType, kUSBBulk, (uint32_t)noDataTimeout, (uint32_t)completionTimeout);
 		return kIOReturnBadArgument;
     }
 
     if (!buffer || (buffer->getLength() < reqCount))
     {
-        USBLog(5, "IOUSBPipe[%p]::Write - bad buffer: (buffer %p) || ( length %ld < reqCount %ld)", this, buffer, buffer->getLength(), reqCount);
+        USBLog(5, "IOUSBPipe[%p]::Write - bad buffer: (buffer %p) || ( length %qd < reqCount %qd)", this, buffer, buffer ? (uint64_t)buffer->getLength() : 0, (uint64_t)reqCount);
 		return kIOReturnBadArgument;
     }
 
@@ -800,7 +865,7 @@ IOUSBPipe::ClearPipeStall(bool withDeviceRequest)
 			}
 			params.options = deviceAddress + (endpointNum <<8) + (endpointType << 16) + (in << 24);
 			
-			USBLog(5, "[%p] ClearPipeStall, calling device messageClients (kIOUSBMessageHubPortClearTT) with options: 0x%lx", this, params.options);
+			USBLog(6, "IOUSBPipe[%p]::ClearPipeStall  calling device messageClients (kIOUSBMessageHubPortClearTT) with options: 0x%x", this, (uint32_t)params.options);
 			_device->_expansionData->_usbPlaneParent->retain();
 			(void) _device->_expansionData->_usbPlaneParent->messageClients(kIOUSBMessageHubPortClearTT, &params, sizeof(params));
 			_device->_expansionData->_usbPlaneParent->release();
@@ -906,7 +971,7 @@ IOUSBPipe::Read(IOMemoryDescriptor *	buffer,
 {
     IOReturn	err = kIOReturnSuccess;
 
-    USBLog(7, "IOUSBPipe[%p]::Read (Low Latency Isoc) buffer: %p, completion: %p, numFrames: %ld, update: %ld", this, buffer, completion, numFrames, updateFrequency);
+    USBLog(7, "IOUSBPipe[%p]::Read (Low Latency Isoc) buffer: %p, completion: %p, numFrames: %d, update: %d", this, buffer, completion, (uint32_t)numFrames, (uint32_t)updateFrequency);
     if (_correctStatus == kIOUSBPipeStalled)
     {
         USBLog(2, "IOUSBPipe[%p]::Read (Low Latency Isoc) - invalid read on a stalled low latency isoch pipe", this);
@@ -937,6 +1002,7 @@ IOUSBPipe::Read(IOMemoryDescriptor *	buffer,
         tap.action = (IOUSBLowLatencyIsocCompletionAction) &IOUSBSyncIsoCompletion;
         tap.parameter = NULL;
 
+        USBLog(3, "IOUSBPipe[%p]::Read Sync (Low Latency Isoc) completion: %p", this, tap.action);
         err = _controller->IsocIO(buffer, frameStart, numFrames, pFrames, _address, &_endpoint, &tap, updateFrequency);
     }
     else
@@ -959,7 +1025,7 @@ IOUSBPipe::Write(IOMemoryDescriptor * buffer, UInt64 frameStart, UInt32 numFrame
 {
     IOReturn	err = kIOReturnSuccess;
 
-    USBLog(7, "IOUSBPipe[%p]::Write (Low Latency Isoc) buffer: %p, completion: %p, numFrames: %ld, update: %ld", this, buffer, completion, numFrames, updateFrequency);
+    USBLog(7, "IOUSBPipe[%p]::Write (Low Latency Isoc) buffer: %p, completion: %p, numFrames: %d, update: %d", this, buffer, completion, (uint32_t)numFrames, (uint32_t)updateFrequency);
     if (_correctStatus == kIOUSBPipeStalled)
     {
         USBLog(2, "IOUSBPipe[%p]::Write (Low Latency Isoc) - invalid write on a stalled isoch pipe", this);
@@ -1021,16 +1087,16 @@ IOUSBPipe::Read(IOMemoryDescriptor *buffer, UInt32 noDataTimeout, UInt32 complet
         return kIOReturnUnsupported;
     }
     
-    USBLog(7, "IOUSBPipe[%p]::Read #4 (addr %d:%d type %d) - reqCount = %ld", this, _address, _endpoint.number , _endpoint.transferType, reqCount);
+    USBLog(7, "IOUSBPipe[%p]::Read #4 (addr %d:%d type %d) - reqCount = %qd", this, _address, _endpoint.number , _endpoint.transferType, (uint64_t)reqCount);
     if ((_endpoint.transferType != kUSBBulk) && (noDataTimeout || completionTimeout))
     {
-        USBLog(5, "IOUSBPipe[%p]::Read #4 - bad arguments:  (EP type: %d != kUSBBulk(%d)) && ( dataTimeout: %ld || completionTimeout: %ld)", this, _endpoint.transferType, kUSBBulk, noDataTimeout, completionTimeout);
+        USBLog(5, "IOUSBPipe[%p]::Read #4 - bad arguments:  (EP type: %d != kUSBBulk(%d)) && ( dataTimeout: %d || completionTimeout: %d)", this, _endpoint.transferType, kUSBBulk, (uint32_t)noDataTimeout, (uint32_t)completionTimeout);
         return kIOReturnBadArgument;
     }
     
     if (!buffer || (buffer->getLength() < reqCount))
     {
-        USBLog(5, "IOUSBPipe[%p]::Read #4- bad buffer: (buffer %p) || ( length %ld < reqCount %ld)", this, buffer, buffer->getLength(), reqCount);
+        USBLog(5, "IOUSBPipe[%p]::Read #4- bad buffer: (buffer %p) || ( length %qd < reqCount %qd)", this, buffer, buffer ? (uint64_t)buffer->getLength() : 0, (uint64_t)reqCount);
         return kIOReturnBadArgument;
     }
 

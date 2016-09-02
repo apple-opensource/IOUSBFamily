@@ -241,7 +241,7 @@ void show(io_registry_entry_t service, UInt32 serviceDepth, UInt64 stackOfBits, 
 	{
 		UInt32	addr = 0;
 		CFNumberGetValue((CFNumberRef)address, kCFNumberLongType, &addr);
-        sprintf((char *)tempbuf, "%ld: ", addr);
+        sprintf((char *)tempbuf, "%d: ", (uint32_t)addr);
         strcat(buf,tempbuf); 
 		CFRelease(address);
 		address = NULL;
@@ -252,16 +252,17 @@ void show(io_registry_entry_t service, UInt32 serviceDepth, UInt64 stackOfBits, 
 	{
 		UInt32	addr = 0;
 		CFNumberGetValue((CFNumberRef)address, kCFNumberLongType, &addr);
-        sprintf((char *)tempbuf, "0x%lx: ", addr);
+        sprintf((char *)tempbuf, "0x%x: ", (uint32_t)addr);
         strcat(buf,tempbuf); 
 		CFRelease(address);
 		address = NULL;
     }
 	
 	status = IORegistryEntryGetNameInPlane(service, plane, name);
-    
-    sprintf((char *)tempbuf, (char *)name);
-    strcat(buf,tempbuf);
+    if (status == KERN_SUCCESS)  {
+        sprintf((char *)tempbuf, "%s", name);
+        strcat(buf,tempbuf); 
+    }
     
     status = IORegistryEntryGetLocationInPlane(service, plane, location);
     if (status == KERN_SUCCESS)  {
@@ -330,6 +331,7 @@ void scanUSBDevices(io_iterator_t intfIterator, OutlineViewNode * rootNode, char
 			{
 				classCode = * (UInt32 *) bytes;
 			}
+			CFRelease(asciiClass);
         }
 
 		if ( (classCode == (0x000c0310)) || (classCode == (0x000c0320)) || (classCode == (0x000c0300)) || 
