@@ -2,7 +2,7 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1998-2003 Apple Computer, Inc.  All Rights Reserved.
+ * Copyright (c) 1998-2007 Apple Inc.  All Rights Reserved.
  * 
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
@@ -56,7 +56,9 @@
 //================================================================================================
 #define kUSBSetup 		kUSBNone
 #define kAppleCurrentAvailable	"AAPL,current-available"
-#define kUSBBusID		"AAPL,bus-id"
+#define kAppleCurrentInSleep	"AAPL,current-in-sleep"
+#define kAppleCurrentExtra		"AAPL,current-extra"
+#define kUSBBusID				"AAPL,bus-id"
 
 #define super IOUSBBus
 
@@ -101,10 +103,9 @@ typedef struct IOUSBSyncCompletionTarget IOUSBSyncCompletionTarget;
 //   Globals (static member variables)
 //
 //================================================================================================
-#define kUSBSetup 		kUSBNone
-#define kAppleCurrentAvailable	"AAPL,current-available"
-#define kUSBBusID		"AAPL,bus-id"
-#define	kMaxNumberUSBBusses	256
+#define kUSBSetup				kUSBNone
+#define kUSBBusID				"AAPL,bus-id"
+#define	kMaxNumberUSBBusses		256
 
 // These are really a static member variable (system wide global)
 //
@@ -1092,13 +1093,19 @@ IOUSBController::IsocTransaction(IOUSBIsocCommand *command)
     completion.parameter = (void *)command;
 
 	command->SetUSLCompletion(completion);
+	if (!_activeIsochTransfers)
+		requireMaxBusStall(10000);										// require a max stall of 10 microseconds on the PCI bus
+		
 	_activeIsochTransfers++;
 	err = UIMCreateIsochTransfer(command);	
     if (err) 
 	{
         USBLog(3,"%s[%p]::IsocTransaction: error queueing isoc transfer (0x%x)", getName(), this, err);
 		_activeIsochTransfers--;
+		if (!_activeIsochTransfers)
+			requireMaxBusStall(0);										// remove max stall requirement on the PCI bus
     }
+
     return err;
 }
 
@@ -1327,7 +1334,7 @@ IOUSBController::DoIOTransfer(OSObject *owner, void *cmd, void *, void *, void *
     {
         // prior to 1.8.3f5, we would call the completion routine here. that seems
         // a mistake, so we don't do it any more
-        USBLog(1, "%s[%p]::DoIOTransfer - error 0x%x queueing request", controller->getName(), controller, err);
+        USBLog(2, "%s[%p]::DoIOTransfer - error 0x%x queueing request", controller->getName(), controller, err);
     }
 	
     return err;
@@ -2713,6 +2720,15 @@ IOUSBController::CreateRootHubDevice( IOService * provider, IOUSBRootHubDevice *
     appleCurrentProperty = provider->getProperty(kAppleCurrentAvailable);
     if (appleCurrentProperty)
         (*rootHubDevice)->setProperty(kAppleCurrentAvailable, appleCurrentProperty);
+
+	// 5187893 - do the same for these other two properties
+    appleCurrentProperty = provider->getProperty(kAppleCurrentInSleep);
+    if (appleCurrentProperty)
+        (*rootHubDevice)->setProperty(kAppleCurrentInSleep, appleCurrentProperty);
+
+    appleCurrentProperty = provider->getProperty(kAppleCurrentExtra);
+    if (appleCurrentProperty)
+        (*rootHubDevice)->setProperty(kAppleCurrentExtra, appleCurrentProperty);
 	
 ErrorExit:
 		

@@ -72,6 +72,7 @@ __attribute__((format(printf, 1, 2)));
 #define _interfaceNumber					_usbHIDExpansionData->_interfaceNumber
 #define _logHIDReports						_usbHIDExpansionData->_logHIDReports
 #define _hidLoggingLevel					_usbHIDExpansionData->_hidLoggingLevel
+#define	_interruptTimeStamp					_usbHIDExpansionData->_interruptTimeStamp
 
 #define ABORTEXPECTED                       _deviceIsDead
 
@@ -432,7 +433,39 @@ IOUSBHIDDriver::message( UInt32 type, IOService * provider,  void * argument )
             ABORTEXPECTED = FALSE;
             _deviceHasBeenDisconnected = FALSE;
 			
-            err = RearmInterruptRead();
+			// Redo any initialization that we did at boot time
+			
+			if ( _interface && _device )
+			{
+				// For Keyboards, set the idle millecs to 24 or to 0 if from Apple
+				//
+				if ( (_interface->GetInterfaceClass() == kUSBHIDClass) &&
+					 (_interface->GetInterfaceSubClass() == kUSBHIDBootInterfaceSubClass) &&
+					 (_interface->GetInterfaceProtocol() == kHIDKeyboardInterfaceProtocol) )
+				{
+					if (_device->GetVendorID() == kIOUSBVendorIDAppleComputer)
+					{
+						SetIdleMillisecs(0);
+					}
+					else
+					{
+						SetIdleMillisecs(24);
+					}
+				}
+				
+				// Set the device into Report Protocol if it's a bootInterface subClass interface
+				//
+				if (_interface->GetInterfaceSubClass() == kUSBHIDBootInterfaceSubClass)
+					err = SetProtocol( kHIDReportProtocolValue );
+				
+				// Errata for ALL Saitek devices.  Do a SET_IDLE 0 call
+				//
+				if ( (_device->GetVendorID()) == 0x06a3 )
+					SetIdleMillisecs(0);
+			}
+				
+			// Finally, rearm our read
+			err = RearmInterruptRead();
 			break;
 			
         case kIOUSBMessagePortHasBeenSuspended:
@@ -459,9 +492,9 @@ IOUSBHIDDriver::message( UInt32 type, IOService * provider,  void * argument )
 				// Now, set it again
 				_suspendPortTimer->setTimeoutMS(_suspendTimeoutInMS);
 			}
+				
+				break;
 			
-            break;
-
         default:
             break;
     }
@@ -1028,6 +1061,7 @@ IOUSBHIDDriver::InterruptReadHandlerEntry(OSObject *target, void *param, IORetur
     if (!me)
         return;
     
+	// If we don't have a timestamp, we need to fake one up
     clock_get_uptime(&timeStamp);
     me->InterruptReadHandler(status, bufferSizeRemaining, timeStamp);
     me->DecrementOutstandingIO();
@@ -1054,6 +1088,9 @@ IOUSBHIDDriver::InterruptReadHandler(IOReturn status, UInt32 bufferSizeRemaining
     UInt64			timeElapsed;
     AbsoluteTime	timeStop;
     
+	// Save our timestamp, since we are going to callout to the HID manager
+	_interruptTimeStamp = timeStamp;
+	
     // Calculate the # of milliseconds since we woke up.  If this is <= the amount specified in _msToIgnoreTransactionsAfterWake, then
     // we will ignore the transaction.
     //clock_get_uptime(&timeStop);
@@ -1096,7 +1133,7 @@ IOUSBHIDDriver::InterruptReadHandler(IOReturn status, UInt32 bufferSizeRemaining
             // of USB I/O if the HID system is blocked
             //
             IncrementOutstandingIO();
-            thread_call_enter1(_handleReportThread, (thread_call_param_t) &timeStamp);
+            thread_call_enter1(_handleReportThread, (thread_call_param_t) &_interruptTimeStamp);
             break;
 			
         case kIOReturnNotResponding:
@@ -1350,15 +1387,11 @@ void
 IOUSBHIDDriver::HandleReportEntry(OSObject *target, thread_call_param_t timeStamp)
 {
     IOUSBHIDDriver *	me = OSDynamicCast(IOUSBHIDDriver, target);
-    AbsoluteTime		theTime;
 	
     if (!me)
         return;
     
-	// Make a copy  of the timeStamp parameter, since it can be overwritten by the next transaction
-	//
-	theTime = * (AbsoluteTime *)timeStamp;
-    me->HandleReport( theTime );
+    me->HandleReport(  * (AbsoluteTime *)timeStamp );
     me->DecrementOutstandingIO();
 }
 

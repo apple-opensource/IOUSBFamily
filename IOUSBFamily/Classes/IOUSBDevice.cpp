@@ -2,7 +2,7 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1998-2003 Apple Computer, Inc.  All Rights Reserved.
+ * Copyright (c) 1998-2007 Apple Inc.  All Rights Reserved.
  * 
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
@@ -496,12 +496,6 @@ IOUSBDevice::free()
             _workLoop = NULL;
         }
 
-		if ( _usbPlaneParent )
-		{
-			_usbPlaneParent->release();
-			_usbPlaneParent = NULL;
-		}
-		
         IOFree(_expansionData, sizeof(ExpansionData));
         _expansionData = NULL;
     }
@@ -1835,17 +1829,6 @@ IOUSBDevice::matchPropertyTable(OSDictionary * table, SInt32 *score)
     if (!super::matchPropertyTable(table))  
         return false;
 	
-    // something of a hack. We need the IOUSBUserClientInit "driver" to match in order
-    // for us to be able to find the user mode plugin. However, that driver can't
-    // effectively match using the USB Common Class Spec, so we special case it as a
-    // short circuit
-    userClientInitMatchKey = OSDynamicCast(OSString, table->getObject(kIOMatchCategoryKey));
-    if (userClientInitMatchKey && !strcmp(userClientInitMatchKey->getCStringNoCopy(), "IOUSBUserClientInit"))
-    {
-        *score = 9000;
-        return true;
-    }
-    
     // If the property score is > 10000, then clamp it to 9000.  We will then add this score
     // to the matching criteria score.  This will allow drivers
     // to still override a driver with the same matching criteria.  Since we score the matching
@@ -1952,7 +1935,7 @@ IOUSBDevice::matchPropertyTable(OSDictionary * table, SInt32 *score)
 		
 		if (identifier)
 		{
-			USBLog(5,"Finding device driver for %s, matching personality using %s, score: %ld", getName(), identifier->getCStringNoCopy(), *score);
+			USBLog(5,"Finding device driver for %s, matching personality using %s, score: %ld, wildCard = %ld", getName(), identifier->getCStringNoCopy(), *score, wildCardMatches);
 		}
 		else
 		{
@@ -3254,7 +3237,16 @@ IOUSBDevice::GetBus(void)
 UInt32 
 IOUSBDevice::GetBusPowerAvailable( void ) 
 { 
+	USBLog(2, "IOUSBDevice[%p]::GetBusPowerAvailable - returning(%d)", this, (int)_busPowerAvailable);
     return _busPowerAvailable; 
+}
+
+void
+IOUSBDevice::SetBusPowerAvailable(UInt32 newPower)
+{
+	_busPowerAvailable = newPower;
+	setProperty(kUSBDevicePropertyBusPowerAvailable, (unsigned long long)_busPowerAvailable, (sizeof(_busPowerAvailable) * 8));
+	USBLog(2, "IOUSBDevice[%p]::SetBusPowerAvailable - power now(%d)", this, (int)_busPowerAvailable);
 }
 
 UInt8 
