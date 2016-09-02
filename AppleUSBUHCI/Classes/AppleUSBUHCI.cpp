@@ -31,7 +31,7 @@ extern "C" {
 
 #include <IOKit/IOMessage.h>
 #include <IOKit/IOPlatformExpert.h>
-#include <IOKit/pccard/IOPCCard.h>
+
 #include <IOKit/platform/ApplePlatformExpert.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -1044,7 +1044,8 @@ AppleUSBUHCI::scavengeIsochTransactions(void)
 	
     if (pDoneEl && (cachedConsumer != cachedProducer))
     {
-		EnsureUsability();
+		// rdar://5768268 - no longer call EnsureUsability() since it is no longer a lightweight call - if we are completing transactions then there is a
+		// port active somewhere 
 		
 		// there is real work to do - first reverse the list
 		prevEl = NULL;

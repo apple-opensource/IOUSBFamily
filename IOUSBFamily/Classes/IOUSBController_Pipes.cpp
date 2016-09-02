@@ -398,12 +398,14 @@ IOUSBController::Read(IOMemoryDescriptor *buffer, USBDeviceAddress address, Endp
     err = CheckForDisjointDescriptor(command, endpoint->maxPacketSize);
     if (kIOReturnSuccess == err)
 	{
+		bool	isSyncTransfer = command->GetIsSyncTransfer();
+
 		err = _commandGate->runAction(DoIOTransfer, command);
 		
 		// If we have a sync request, then we always return the command after the DoIOTransfer.  If it's an async request, we only return it if 
 		// we get an immediate error
 		//
-		if ( command->GetIsSyncTransfer() || (kIOReturnSuccess != err) )
+		if ( isSyncTransfer || (kIOReturnSuccess != err) )
 		{
 			IODMACommand		*dmaCommand = command->GetDMACommand();
 			IOMemoryDescriptor	*memDesc = dmaCommand ? (IOMemoryDescriptor	*)dmaCommand->getMemoryDescriptor() : NULL;
@@ -585,12 +587,14 @@ IOUSBController::Write(IOMemoryDescriptor *buffer, USBDeviceAddress address, End
     err = CheckForDisjointDescriptor(command, endpoint->maxPacketSize);
     if (kIOReturnSuccess == err)
 	{
+		bool	isSyncTransfer = command->GetIsSyncTransfer();
+		
 		err = _commandGate->runAction(DoIOTransfer, command);
 		
 		// If we have a sync request, then we always return the command after the DoIOTransfer.  If it's an async request, we only return it if 
 		// we get an immediate error
 		//
-		if ( command->GetIsSyncTransfer() || (kIOReturnSuccess != err) )
+		if ( isSyncTransfer || (kIOReturnSuccess != err) )
 		{
 			IODMACommand		*dmaCommand = command->GetDMACommand();
 			IOMemoryDescriptor	*memDesc = dmaCommand ? (IOMemoryDescriptor	*)dmaCommand->getMemoryDescriptor() : NULL;
@@ -841,7 +845,7 @@ IOUSBController::IsocIO(IOMemoryDescriptor *			buffer,
 		return err;
 	}
 	USBLog(7, "%s[%p]::IsocIO(LL) - putting buffer %p into dmaCommand %p which has getMemoryDescriptor %p", getName(), this, buffer, command->GetDMACommand(), command->GetDMACommand()->getMemoryDescriptor());
-	err = command->GetDMACommand()->setMemoryDescriptor(buffer);								// this automatically calls prepare()
+	err = dmaCommand->setMemoryDescriptor(buffer);								// this automatically calls prepare()
 	if (err)
 	{
 		USBLog(1, "%s[%p]::IsocIO(LL) - dmaCommand[%p]->setMemoryDescriptor(%p) failed with status (%p)", getName(), this, command->GetDMACommand(), buffer, (void*)err);

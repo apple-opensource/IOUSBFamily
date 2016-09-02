@@ -110,6 +110,7 @@ class AppleUSBHub : public IOUSBHubPolicyMaker
     thread_call_t						_clearFeatureEndpointHaltThread;
 	thread_call_t						_checkForActivePortsThread;
 	thread_call_t						_waitForPortResumesThread;
+	thread_call_t						_ensureUsabilityThread;
 
     // Port stuff
     UInt8								_readBytes;
@@ -120,6 +121,7 @@ class AppleUSBHub : public IOUSBHubPolicyMaker
     bool								_inTestMode;							// T while we are in test mode
 	bool								_needToAckSetPowerState;
 	bool								_checkPortsThreadActive;
+	bool								_abandonCheckPorts;						// T if we should abandon the check ports thread
     IOTimerEventSource *				_timerSource;
     UInt32								_timeoutFlag;
     UInt32								_portTimeStamp[32];
@@ -229,6 +231,7 @@ public:
     virtual bool			finalize(IOOptionBits options);
     virtual IOReturn		message( UInt32 type, IOService * provider,  void * argument = 0 );
 	virtual IOReturn		powerStateWillChangeTo ( IOPMPowerFlags capabilities, unsigned long stateNumber, IOService* whatDevice);
+	virtual IOReturn		setPowerState ( unsigned long powerStateOrdinal, IOService* whatDevice );
 	virtual IOReturn		powerStateDidChangeTo ( IOPMPowerFlags capabilities, unsigned long stateNumber, IOService* whatDevice);
 	virtual void			powerChangeDone ( unsigned long fromState);
 
@@ -242,7 +245,11 @@ public:
 	// IOUSBHubPolicyMaker methods
 	virtual bool			ConfigureHubDriver(void);
 	virtual IOReturn		HubPowerChange(unsigned long powerStateOrdinal);
+	virtual IOReturn		EnsureUsability(void);
 	
+	// static entry for EnsureUsability to make sure we are outside of the gate when we do it
+    static void				EnsureUsabilityEntry(OSObject *target);
+
 	// inline method
     IOUSBDevice * GetDevice(void) { return _device; }
 

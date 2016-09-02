@@ -735,7 +735,7 @@ IOUSBDevice::message( UInt32 type, IOService * provider,  void * argument )
 		// as an error.  However, any client that does not implement the message method will return
 		// kIOReturnUnsupported, so we have to treat that as not an error
 		//
-		if ( _USBPLANE_PARENT )
+		if ( _expansionData && _USBPLANE_PARENT )
 		{
 			_USBPLANE_PARENT->retain();
 			
@@ -842,7 +842,11 @@ IOUSBDevice::message( UInt32 type, IOService * provider,  void * argument )
 			
 			USBLog(5,"%s[%p]: kIOUSBMessagePortHasBeenSuspended calling _doClientMessage ",getName(),this);
 			retain();
-			thread_call_enter1( _DO_MESSAGE_CLIENTS_THREAD, (thread_call_param_t) messageStructPtr );
+			if ( thread_call_enter1( _DO_MESSAGE_CLIENTS_THREAD, (thread_call_param_t) messageStructPtr ) == TRUE )
+			{
+				USBLog(3,"%s[%p]: kIOUSBMessagePortHasBeenSuspended _DO_MESSAGE_CLIENTS_THREAD already queued ",getName(),this);
+				release();
+			}
 			
 		}
 		break;
@@ -1244,10 +1248,11 @@ IOUSBDevice::ResetDevice()
     USBLog(5, "-%s[%p] ResetDevice for port %ld, error: 0x%x", getName(), this, _PORT_NUMBER, _RESET_ERROR );
 	
     _RESET_IN_PROGRESS = false;
+    kr = _RESET_ERROR;
 	
     release();
 	
-    return _RESET_ERROR;
+    return kr;
 }
 
 /******************************************************
@@ -2895,7 +2900,11 @@ IOUSBDevice::SuspendDevice( bool suspend )
 	retain();
 	
 	USBLog(5, "+%s[%p]::SuspendDevice(%s) for port %ld", getName(), this, suspend ? "suspend" : "resume", _PORT_NUMBER );
-	thread_call_enter1( _DO_PORT_SUSPEND_THREAD, (thread_call_param_t) suspend );
+	if ( thread_call_enter1( _DO_PORT_SUSPEND_THREAD, (thread_call_param_t) suspend ) == TRUE )
+	{
+		USBLog(3, "%s[%p]::SuspendDevice(%s) for port %ld, _DO_PORT_SUSPEND_THREAD already queued", getName(), this, suspend ? "suspend" : "resume", _PORT_NUMBER );
+		release();
+	}
 	
 	if ( _WORKLOOP->inGate() && _COMMAND_GATE)
 	{
@@ -2962,7 +2971,11 @@ IOUSBDevice::ReEnumerateDevice( UInt32 options )
     //
     USBLog(3, "+%s[%p] ReEnumerateDevice for port %ld, options 0x%lx", getName(), this, _PORT_NUMBER, options );
     retain();
-    thread_call_enter1( _DO_PORT_REENUMERATE_THREAD, (thread_call_param_t) options );
+    if ( thread_call_enter1( _DO_PORT_REENUMERATE_THREAD, (thread_call_param_t) options) == TRUE )
+	{
+		USBLog(3, "+%s[%p] ReEnumerateDevice for port %ld, _DO_PORT_REENUMERATE_THREAD already queued", getName(), this, _PORT_NUMBER );
+		release();
+	}
 	
     USBLog(3, "-%s[%p] ReEnumerateDevice for port %ld", getName(), this, _PORT_NUMBER );
     
@@ -3125,7 +3138,7 @@ IOUSBDevice::ProcessPortReEnumerate(UInt32 options)
     // just send a message to all the clients of our parent.  The hub driver will be the only one that
     // should do anything with that message.
     //
-    if ( _USBPLANE_PARENT )
+    if ( _expansionData && _USBPLANE_PARENT )
     {
         USBLog(3, "%s[%p] calling messageClients (kIOUSBMessageHubReEnumeratePort)", getName(), this);
         _USBPLANE_PARENT->retain();
@@ -3163,6 +3176,9 @@ IOUSBDevice::ProcessPortSuspend(bool suspend)
     IOReturn			err = kIOReturnSuccess;
 	
     USBLog(6,"+%s[%p]::ProcessPortSuspend, _PORT_SUSPEND_THREAD_ACTIVE = %d, isInactive() = %d",getName(), this, _PORT_RESET_THREAD_ACTIVE, isInactive() ); 
+	
+	if (!_expansionData)
+		return;
 	
 	// if we are already resetting the port, then just return ( Perhaps we should do this atomically)?
 	//

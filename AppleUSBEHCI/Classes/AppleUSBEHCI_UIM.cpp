@@ -2,7 +2,7 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1998-2007 Apple Inc.  All Rights Reserved.
+ * Copyright (c) 1998-2008 Apple Inc.  All Rights Reserved.
  * 
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
@@ -320,6 +320,8 @@ AppleUSBEHCI::AddEmptyCBEndPoint(UInt8					functionAddress,
     }
 	
     CBED->GetSharedLogical()->flags |= HostToUSBLong(myDataToggleCntrl | cFlag);
+	
+	// note that it is possible for pED to be NULL here, which means it won't really be linked in until later
 	linkAsyncEndpoint(CBED, pED);
     
     return CBED;
@@ -2255,7 +2257,7 @@ AppleUSBEHCI::AbortIsochEP(AppleEHCIIsochEndpoint* pEP)
 							{
 								if (!stopAdvancing)
 								{
-									USBLog(6, "AppleUSBEHCI[%p]::AbortIsochEP(%p) - advancing _outslot from 0x%x to 0x%lx", this, pEP, _outSlot, nextSlot);
+									USBLog(7, "AppleUSBEHCI[%p]::AbortIsochEP(%p) - advancing _outslot from 0x%x to 0x%lx", this, pEP, _outSlot, nextSlot);
 									_outSlot = nextSlot;
 								}
 								else
@@ -2269,7 +2271,11 @@ AppleUSBEHCI::AbortIsochEP(AppleEHCIIsochEndpoint* pEP)
 						// done with the TD
                         
                         err = pTD->UpdateFrameList(timeStamp);											// TODO - accumulate the return values or force abort err
-						pEP->scheduledTDs--;
+						OSDecrementAtomic( &(pEP->scheduledTDs));
+						if ( pEP->scheduledTDs < 0 )
+						{
+							USBLog(1, "AppleUSBEHCI[%p]::AbortIsochEP (%p) - scheduleTDs is negative! (%ld)", this, pEP, pEP->scheduledTDs);
+						}
                         PutTDonDoneQueue(pEP, pTD, true	);
                     }
 					else if (pTD->_pEndpoint == NULL)
@@ -2303,7 +2309,7 @@ AppleUSBEHCI::AbortIsochEP(AppleEHCIIsochEndpoint* pEP)
 		pTD = GetTDfromToDoList(pEP);
     }
 
-	if (!pEP->scheduledTDs)
+	if (pEP->scheduledTDs == 0)
 	{
 		// since we have no Isoch xactions on the endpoint, we can reset the counter
 		pEP->firstAvailableFrame = 0;
@@ -2413,7 +2419,22 @@ AppleUSBEHCI::HaltAsyncEndpoint(AppleEHCIQueueHead *pED, AppleEHCIQueueHead *pED
 		unlinkAsyncEndpoint(pED, pEDBack);
 		pED->GetSharedLogical()->qTDFlags |= HostToUSBLong(kEHCITDStatus_Halted);
 		pED->GetSharedLogical()->qTDFlags &= ~(HostToUSBLong(kEHCITDStatus_Active));
-		linkAsyncEndpoint(pED, _AsyncHead);
+		
+		// 3-4-08 rdar://5779996
+		// it is possible that the unlink above has zerod out _AsyncHead, and the link code won't automatically set it back
+		// so do that the same way we always do, at least until we solve rdar://5779967
+		// this code is copied from a different place
+		if (_AsyncHead)
+		{
+			linkAsyncEndpoint(pED, _AsyncHead);
+		}
+		else
+		{
+			linkAsyncEndpoint(pED, NULL);
+			_AsyncHead = pED;
+			_pEHCIRegisters->AsyncListAddr = HostToUSBLong( pED->_sharedPhysical );
+			EnableAsyncSchedule(false);
+		}
     }
 }
 
@@ -2672,7 +2693,7 @@ AppleUSBEHCI::unlinkIntEndpoint(AppleEHCIQueueHead * pED)
 			_logicalPeriodicList[i] = pED->_logicalNext;
 			_periodicList[i] = HostToUSBLong(pED->GetPhysicalLink());
 			foundED = true;
-			USBLog(6, "AppleUSBEHCI[%p]::unlinkIntEndpoint- found ED at top of list %d, new logical=%p, new physical=0x%x", this, i, _logicalPeriodicList[i], USBToHostLong(_periodicList[i]));
+			USBLog(7, "AppleUSBEHCI[%p]::unlinkIntEndpoint- found ED at top of list %d, new logical=%p, new physical=0x%x", this, i, _logicalPeriodicList[i], USBToHostLong(_periodicList[i]));
 		}
 		else
 		{
@@ -2762,38 +2783,80 @@ AppleUSBEHCI::unlinkAsyncEndpoint(AppleEHCIQueueHead * pED, AppleEHCIQueueHead *
 			USBLog(7, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint: ED not head, but pEDQueueBack not NULL",this);
 		}
 		
-		// If the async schedule is  enabled,  ring the doorbell, otherwise, just finish
-		if ( USBToHostLong(_pEHCIRegisters->USBSTS) & kEHCISTSAsyncScheduleStatus ) 
+		
+		STS = USBToHostLong(_pEHCIRegisters->USBSTS);
+		CMD = USBToHostLong(_pEHCIRegisters->USBCMD);
+
+		// 5664375 - only need to do the following if the Async list is enabled in the CMD register
+		if (CMD & kEHCICMDAsyncEnable) 
 		{
 			// ED is unlinked, now tell controller
-			CMD = USBToHostLong(_pEHCIRegisters->USBCMD);
-			_pEHCIRegisters->USBCMD = HostToUSBLong(CMD | kEHCICMDAsyncDoorbell);
 			
-			// Wait for controller to acknowledge
-			
-			STS = USBToHostLong(_pEHCIRegisters->USBSTS);
-			count = 0;
-			
-			while((STS & kEHCIAAEIntBit) == 0)
+			// 5664375 first make sure that the controller knows it is enabled..
+			for (count=0; (count < 100) && !(STS & kEHCISTSAsyncScheduleStatus); count++)
 			{
 				IOSleep(1);
 				STS = USBToHostLong(_pEHCIRegisters->USBSTS);
-				count++;
-				if ( count > 10000)
+			}
+			if (count)
+			{
+				USBLog(2, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint: waited %d ms for the asynch schedule to come ON in the STS register", this, (int)count);
+			}
+			if (!(STS & kEHCISTSAsyncScheduleStatus))
+			{
+				USBLog(1, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint - the schedule status didn't go ON in the STS register!!", this);
+			}
+			else
+			{
+				// ring the doorbell
+				_pEHCIRegisters->USBCMD = HostToUSBLong(CMD | kEHCICMDAsyncDoorbell);
+				
+				// Wait for controller to acknowledge
+				
+				STS = USBToHostLong(_pEHCIRegisters->USBSTS);
+				count = 0;
+				
+				while((STS & kEHCIAAEIntBit) == 0)
 				{
-					// Bail out after 10 seconds
-					break;
-				}
-			};
-			
-			USBLog(5, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint: delayed for %ld",this, count);
-			
-			// Clear request
-			_pEHCIRegisters->USBSTS = HostToUSBLong(kEHCIAAEIntBit);
+					IOSleep(1);
+					STS = USBToHostLong(_pEHCIRegisters->USBSTS);
+					count++;
+					if ((count % 1000) == 0)
+					{
+						USBLog(2, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint: count(%d) USBCMD(%p) USBSTS(%p) USBINTR(%p) ", this, (int)count, (void*)USBToHostLong(_pEHCIRegisters->USBCMD), (void*)USBToHostLong(_pEHCIRegisters->USBSTS), (void*)USBToHostLong(_pEHCIRegisters->USBIntr));
+					}
+					if ( count > 10000)
+					{
+						// Bail out after 10 seconds
+						break;
+					}
+				};
+				
+				USBLog(2, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint: delayed for %d ms after rining the doorbell", this, (int)count);
+				
+				// Clear request
+				_pEHCIRegisters->USBSTS = HostToUSBLong(kEHCIAAEIntBit);
+			}
 		}
 		else
 		{
 			USBLog(5, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint  Async schedule was disabled", this);
+			// make sure it is OFF in the status register as well before we leave this routine
+			STS = USBToHostLong(_pEHCIRegisters->USBSTS);
+			for (count=0; (count < 100) && (STS & kEHCISTSAsyncScheduleStatus); count++)
+			{
+				IOSleep(1);
+				STS = USBToHostLong(_pEHCIRegisters->USBSTS);
+			}
+			if (count)
+			{
+				USBLog(2, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint: waited %d ms for the asynch schedule to go OFF in the STS register", this, (int)count);
+			}
+			STS = USBToHostLong(_pEHCIRegisters->USBSTS);
+			if (STS & kEHCISTSAsyncScheduleStatus)
+			{
+				USBLog(1, "AppleUSBEHCI[%p]::unlinkAsyncEndpoint - the schedule status didn't go OFF in the STS register!!", this);
+			}
 		}
     }
 }	
@@ -3713,6 +3776,8 @@ AppleUSBEHCI::AddIsocFramesToSchedule(AppleEHCIIsochEndpoint	*pEP)
 		return;
     }
 
+	USBLog(7, "AppleUSBEHCI[%p]::AddIsocFramesToSchedule - scheduledTDs = %ld, deferredTDs = %ld", this, pEP->scheduledTDs, pEP->deferredTDs);
+
 	// 4211382 - This routine is already non-reentrant, since it runs on the WL.
 	// However, we also need to disable preemption while we are in here, since we have to get everything
 	// done within a couple of milliseconds, and if we are preempted, we may come back long after that
@@ -3747,7 +3812,7 @@ AppleUSBEHCI::AddIsocFramesToSchedule(AppleEHCIIsochEndpoint	*pEP)
 		pTD = GetTDfromToDoList(pEP);
 		//USBLog(7, "AppleUSBEHCI[%p]::AddIsocFramesToSchedule - ignoring TD(%p) because it is too old (%Lx) vs (%Lx) ", this, pTD, pTD->_frameNumber, currFrame);
 		ret = pTD->UpdateFrameList(timeStamp);		// TODO - accumulate the return values
-		if (pEP->scheduledTDs)
+		if (pEP->scheduledTDs > 0)
 			PutTDonDeferredQueue(pEP, pTD);
 		else
 		{
@@ -3756,15 +3821,19 @@ AppleUSBEHCI::AddIsocFramesToSchedule(AppleEHCIIsochEndpoint	*pEP)
 		}
 	    
         //USBLog(7, "AppleUSBEHCI[%p]::AddIsocFramesToSchedule - pTD = %p", this, pTD);
-		if(pEP->toDoList == NULL)
+		if (pEP->toDoList == NULL)
 		{	
 			// Run out of transactions to move.  Call this on a separate thread so that we return to the caller right away
             // 
 			// ReturnIsocDoneQueue(pEP);
 			IOSimpleLockUnlock(_isochScheduleLock);
 			// OK to call USBLog, now that preemption is reenabled
-            USBLog(7, "AppleUSBEHCI[%p]::AddIsocFramesToSchedule - calling the ReturnIsocDoneQueue on a separate thread", this);
-            thread_call_enter1(_returnIsochDoneQueueThread, (thread_call_param_t) pEP);
+			USBLog(7, "AppleUSBEHCI[%p]::AddIsocFramesToSchedule - calling thread_call_enter1(_returnIsochDoneQueueThread) scheduledTDs = %ld, deferredTDs = %ld", this, pEP->scheduledTDs, pEP->deferredTDs);
+			bool alreadyQueued = thread_call_enter1(_returnIsochDoneQueueThread, (thread_call_param_t) pEP);
+			if ( alreadyQueued )
+			{
+				USBLog(1, "AppleUSBEHCI[%p]::AddIsocFramesToSchedule - thread_call_enter1(_returnIsochDoneQueueThread) was NOT scheduled.  That's not good", this);
+			}
 			return;
 		}
 		newCurrFrame = GetFrameNumber();
@@ -3879,7 +3948,7 @@ AppleUSBEHCI::AddIsocFramesToSchedule(AppleEHCIIsochEndpoint	*pEP)
 				_periodicList[pEP->inSlot] = HostToUSBLong(pTD->GetPhysicalAddrWithType());
 			}
 			
-			pEP->scheduledTDs++;
+			OSIncrementAtomic(&(pEP->scheduledTDs));
 			fetchNewTDFromToDoList = true;
 			// USBLog(5, "AppleUSBEHCI[%p]::AddIsocFramesToSchedule - _periodicList[%x]:%x", this, pEP->inSlot, USBToHostLong(_periodicList[pEP->inSlot]));
 		}
@@ -4145,7 +4214,7 @@ AppleUSBEHCI::UIMCheckForTimeouts(void)
 		if (!(usbsts & kEHCISTSAsyncScheduleStatus))
 		{
 			_asynchScheduleUnsynchCount++;
-			USBLog(2, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Async USBCMD and USBSTS not synched ON (#%d)", this, _asynchScheduleUnsynchCount);
+			USBLog(6, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Async USBCMD and USBSTS not synched ON (#%d)", this, _asynchScheduleUnsynchCount);
 			if (_asynchScheduleUnsynchCount >= 10)
 			{
 				USBError(1, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Async USBCMD and USBSTS not synched ON (#%d)", this, _asynchScheduleUnsynchCount);
@@ -4159,7 +4228,7 @@ AppleUSBEHCI::UIMCheckForTimeouts(void)
 		if (usbsts & kEHCISTSAsyncScheduleStatus)
 		{
 			_asynchScheduleUnsynchCount++;
-			USBLog(2, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Async USBCMD and USBSTS not synched OFF (#%d)", this, _asynchScheduleUnsynchCount);
+			USBLog(6, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Async USBCMD and USBSTS not synched OFF (#%d)", this, _asynchScheduleUnsynchCount);
 			if (_asynchScheduleUnsynchCount >= 10)
 			{
 				USBError(1, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Async USBCMD and USBSTS not synched OFF (#%d)", this, _asynchScheduleUnsynchCount);
@@ -4174,7 +4243,7 @@ AppleUSBEHCI::UIMCheckForTimeouts(void)
 		if (!(usbsts & kEHCISTSPeriodicScheduleStatus))
 		{
 			_periodicScheduleUnsynchCount++;
-			USBLog(2, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Periodic USBCMD and USBSTS not synched ON (#%d)", this, _periodicScheduleUnsynchCount);
+			USBLog(6, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Periodic USBCMD and USBSTS not synched ON (#%d)", this, _periodicScheduleUnsynchCount);
 			if (_periodicScheduleUnsynchCount >= 10)
 			{
 				USBError(1, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Periodic USBCMD and USBSTS not synched ON (#%d)", this, _periodicScheduleUnsynchCount);
@@ -4188,7 +4257,7 @@ AppleUSBEHCI::UIMCheckForTimeouts(void)
 		if (usbsts & kEHCISTSPeriodicScheduleStatus)
 		{
 			_periodicScheduleUnsynchCount++;
-			USBLog(2, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Periodic USBCMD and USBSTS not synched ON (#%d)", this, _periodicScheduleUnsynchCount);
+			USBLog(6, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Periodic USBCMD and USBSTS not synched ON (#%d)", this, _periodicScheduleUnsynchCount);
 			if (_periodicScheduleUnsynchCount >= 10)
 			{
 				USBError(1, "AppleUSBEHCI[%p]::UIMCheckForTimeouts - Periodic USBCMD and USBSTS not synched ON (#%d)", this, _periodicScheduleUnsynchCount);

@@ -498,7 +498,7 @@ AppleUSBUHCI::UIMRootHubStatusChange(void)
     
     USBLog(7, "%s[%p]::UIMRootHubStatusChange (_controllerAvailable: %d)", getName(), this, _controllerAvailable);
 
-	if (_controllerAvailable)
+	if (_controllerAvailable && !_wakingFromHibernation && !_pcCardEjected)
 	{
 		// For UHCI, we first need to see if we have a pending resume
 		RHCheckStatus();
@@ -1107,6 +1107,13 @@ AppleUSBUHCI::RHResumePortCompletion(UInt32 port)
 	if (!_rhPortBeingResumed[port-1])
 	{
 		USBLog(1, "AppleUSBUHCI[%p]::RHResumePortCompletion - port %d does not appear to be resuming!", this, (int)port);
+		return kIOReturnInternalError;
+	}
+	
+	if (!_controllerAvailable)
+	{
+		USBLog(5, "AppleUSBEHCI[%p]::RHResumePortCompletion - cannot finish resume on port %d because the controller is unavailable", this, (int)port);
+		_rhPortBeingResumed[port-1] = false;
 		return kIOReturnInternalError;
 	}
 	
