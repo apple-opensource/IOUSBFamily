@@ -250,7 +250,6 @@ typedef struct IOUSBLowLatencyIsocCompletion {
     void *				parameter;
 } IOUSBLowLatencyIsocCompletion;
 
-typedef struct IOUSBLowLatencyIsocCompletion IOUSBLowLatencyIsocCompletion;
 
 /* ************* USB Family error codes ************* */
 
@@ -662,8 +661,13 @@ enum {
 enum {
         kUSBDeviceSpeedLow		= 0,		// low speed device
         kUSBDeviceSpeedFull		= 1,		// full speed device
-        kUSBDeviceSpeedHigh		= 2			// high speed device
+        kUSBDeviceSpeedHigh		= 2		// high speed device
         };
+
+enum {
+    kUSBFullSpeedMicrosecondsInFrame		= 1000,		// full speed device
+    kUSBHighSpeedMicrosecondsInFrame		= 125		// high speed device
+};
 
 enum {
         kUSBLowLatencyIsochTransferKey	= 'llit'	// Set frStatus field of first frame in isoch transfer to designate as low latency
@@ -676,7 +680,7 @@ struct LowLatencyUserBufferInfo {
     void *			bufferAddress;
     IOByteCount			bufferSize;
     UInt32			bufferType;
-    bool			isPrepared;
+    Boolean			isPrepared;
     LowLatencyUserBufferInfo *	nextBuffer;
 };
 

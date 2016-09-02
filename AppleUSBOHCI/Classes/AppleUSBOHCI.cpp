@@ -28,10 +28,8 @@ extern "C" {
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOMemoryCursor.h>
 #include <IOKit/IOMessage.h>
-#include <IOKit/IOPlatformExpert.h>
 
 #include <IOKit/pccard/IOPCCard.h>
-#include <IOKit/platform/ApplePlatformExpert.h>
 
 #include <IOKit/usb/USB.h>
 #include <IOKit/usb/IOUSBLog.h>
@@ -46,18 +44,6 @@ extern "C" {
 #define NUM_TDS			255 // 1500
 #define NUM_EDS			256 // 1500
 #define NUM_ITDS		192 // 1300
-
-// From the file Gossamer.h that is not available
-enum {
-    kGossamerTypeGossamer = 1,
-    kGossamerTypeSilk,
-    kGossamerTypeWallstreet,
-    kGossamerTypeiMac,
-    kGossamerTypeYosemite,
-    kGossamerType101
-};
-
-
 
 // TDs  per page == 85
 // EDs  per page == 128
@@ -75,6 +61,7 @@ AppleUSBOHCI::init(OSDictionary * propTable)
     if (!super::init(propTable))  return false;
 
     _ohciBusState = kOHCIBusStateOff;
+    _ohciAvailable = true;
     
     _intLock = IOLockAlloc();
     if (!_intLock)
@@ -98,52 +85,14 @@ AppleUSBOHCI::init(OSDictionary * propTable)
 bool
 AppleUSBOHCI::start( IOService * provider )
 {
+    UInt32	ext1;
+    
     USBLog(5,"+%s[%p]::start", getName(), this);
-    
     if( !super::start(provider))
-        return (false);
+        return false;
 
-    //   We need to determine which OHCI controllers don't survive sleep.  These fall into 2 categories:
-    //
-    //   1.  CardBus cards
-    //	 2.  PCI Cards that lose power (right now because of a bug in the PCI Family, USB PCI cards do not prevent
-    //	     sleep, so even cards that don't support the PCI Power Mgmt stuff get their power removed.
-    //
-    //  Additionally, the PowerBook 101 controller cannot survive across sleep (I doesn't support remote wakeup).
-    //
-    //  So here, we look at all those cases and set the _unloadUIMAcrossSleep boolean to true.  As it turns out,
-    //  if a controller does not have the "AAPL,clock-id" property, then it means that it cannot survive sleep.  We
-    //  might need to refine this later once we figure how to deal with PCI cards that can go into PCI sleep mode.
-    //  An exception is the B&W G3, that does not have this property but can sleep.  Sigh...
-
-    //  Deal with CardBus USB cards.  Their provider will be a "IOCardBusDevice", as opposed to a "IOPCIDevice"
-    //
-    _onCardBus = (0 != provider->metaCast("IOCardBusDevice"));
-    if ( _onCardBus )
-        _unloadUIMAcrossSleep = true;
-
-    //  Now, look at PCI cards.  Note that the onboard controller's provider is an IOPCIDevice so we cannot use that
-    //  to distinguish between USB PCI cards and the on board controller.  Instead, we use the existence of the
-    //  "AAPL,clock-id" property in the provider.  If it does not exist, then we are a OHCI controller on a USB PCI card.
-    //
-    if ( !provider->getProperty("AAPL,clock-id") && !((getPlatform()->getChipSetType() == kChipSetTypeGossamer) && getPlatform()->getMachineType() == kGossamerTypeYosemite) )
-    {
-        USBLog(3, "%s[%p]::start OHCI controller will be unloaded across sleep",getName(),this);
-        _unloadUIMAcrossSleep = true;
-    }
-    
-    //   Finally, a PowerBook 101
-    //
-    //if ( (getPlatform()->getChipSetType() == kChipSetTypeGossamer) && getPlatform()->getMachineType() == kGossamerType101 )
-    //{
-    //    USBLog(1,"Running on  a 101 PowerBook");
-    //    _unloadUIMAcrossSleep = true;
-    //}
-
-    // callPlatformFunction symbols
-    usb_remote_wakeup = OSSymbol::withCString("usb_remote_wakeup");
-    registerService();  //needed to find ::callPlatformFunction and then to wake Yosemite
-    initForPM(provider);
+    // super::start sets _device or it fails
+    initForPM(_device);
 
     // Set our initial time for root hub inactivity
     //
@@ -1487,7 +1436,7 @@ AppleUSBOHCI::ProcessCompletedITD (OHCIIsochTransferDescriptorPtr pITD, IOReturn
         
         // Zero out handler first than call it
         //
-        USBLog(6,"%s[%p]::ProcessCompletedITD: calling completion", getName(), this, pITD);
+        // USBLog(7,"%s[%p]::ProcessCompletedITD: calling completion", getName(), this, pITD);
         
         pHandler = pITD->completion.action;
         pITD->completion.action = NULL;
@@ -1535,7 +1484,7 @@ AppleUSBOHCI::DoDoneQueueProcessing(IOPhysicalAddress cachedWriteDoneQueueHead, 
     IOPhysicalAddress			physicalAddress;
     UInt32				pageMask;
     OHCIEndpointDescriptorPtr		tempED;
-    OHCIIsochTransferDescriptorPtr	pITD;
+    OHCIIsochTransferDescriptorPtr	pITD, testITD;
     volatile UInt32			cachedConsumer;
     UInt32				numTDs = 0;
     // This should never happen
@@ -1560,6 +1509,9 @@ AppleUSBOHCI::DoDoneQueueProcessing(IOPhysicalAddress cachedWriteDoneQueueHead, 
     //
     pHCDoneTD = (OHCIGeneralTransferDescriptorPtr) GetLogicalAddress(cachedWriteDoneQueueHead);
     
+	if ( pHCDoneTD == NULL )
+		return kIOReturnSuccess;
+		
     // Now, reverse the queue.  We know how many TD's to process, not by the last one pointing to NULL,
     // but by the fact that cachedConsumer != cachedProducer.  So, go through the loop and increment consumer
     // until they are equal, taking care or the wraparound case.
@@ -1601,13 +1553,57 @@ AppleUSBOHCI::DoDoneQueueProcessing(IOPhysicalAddress cachedWriteDoneQueueHead, 
     //
     _consumerCount = cachedConsumer;
     
-/*
+
+#if 0
     if ( (numTDs > 1) || (numTDs < 1) )
     {
+        OHCIGeneralTransferDescriptorPtr	testTD, nextTD;
+        IOUSBLowLatencyIsocFrame * pLLFrames;
+        int			i;
+        int			frameCount;
+        
+        testTD = pHCDoneTD;
+        
         USBLog(3,"Processed %d (%d) TDs, # filtInterr: %ld, time Interval: %ld", numTDs, _lowLatencyIsochTDsProcessed, _filterInterruptCount, (UInt32) _timeElapsed );
+
+        while (testTD != NULL)
+        {
+            nextTD	= testTD->pLogicalNext;
+            // USBLog(3,"testTD: %p, nextTD: %p",testTD, nextTD);
+            
+            if ( (pHCDoneTD->pType == kOHCIIsochronousInLowLatencyType) || (pHCDoneTD->pType == kOHCIIsochronousOutLowLatencyType) )
+            {
+                // cast to a isoc type
+                testITD = (OHCIIsochTransferDescriptorPtr) testTD;
+                pLLFrames = (IOUSBLowLatencyIsocFrame *) testITD->pIsocFrame;
+                frameCount = (USBToHostLong(testITD->flags) & kOHCIITDControl_FC) >> kOHCIITDControl_FCPhase;
+
+
+                for (i=0; i <= frameCount; i++)
+                {
+                    // Need to process low latency isoch differently than other isoc, as the frameList has an extra parameter (use pLLFrame instead of pFrame )
+                    //
+                        UInt16 offset = USBToHostWord(testITD->offset[i]);
+                        
+                        // Check to see if we really processed this itd before:
+                        // 
+                        if ( (_filterInterruptCount != 0 ))                        
+                        {
+                            if ( (pLLFrames[testITD->frameNum + i].frStatus != (IOReturn) kUSBLowLatencyIsochTransferKey) ) 
+                            {
+                                USBLog(3,"%s[%p]::MoreTD's(%p): frame processed at hw interrupt time: frame: %d,  frTimeStamp.lo: 0x%x",  getName(), this, testITD, i, pLLFrames[testITD->frameNum + i].frTimeStamp.lo);
+                            }
+                        }
+                }
+            
+           }
+            
+            testTD = nextTD;	/* New qHead */
+        }
     }
-*/
     
+#endif
+
     // Now, we have a new done queue head.  Now process this reversed list in LOGICAL order.  That
     // means that we can look for a NULL termination
     //

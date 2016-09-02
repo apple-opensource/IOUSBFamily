@@ -236,7 +236,7 @@ IOUSBDevice::init(USBDeviceAddress deviceAddress, UInt32 powerAvailable, UInt8 s
     _portHasBeenReset = false;
     _deviceterminating = false;
     
-    USBLog(5,"%s @ %d (%ldmA available, %s speed)", getName(), _address,_busPowerAvailable*2, (_speed == kUSBDeviceSpeedLow) ? "low" : "full");
+    USBLog(5,"%s @ %d (%ldmA available, %s speed)", getName(), _address,_busPowerAvailable*2, (_speed == kUSBDeviceSpeedLow) ? "low" : ((_speed == kUSBDeviceSpeedFull) ? "full" : "high") );
     
     return true;
 }
@@ -251,6 +251,7 @@ IOUSBDevice::finalize(IOOptionBits options)
     if(_pipeZero) 
     {
         _pipeZero->Abort();
+	_pipeZero->ClosePipe();
         _pipeZero->release();
         _pipeZero = NULL;
     }
@@ -530,10 +531,10 @@ IOUSBDevice::ResetDevice()
         return kIOReturnNotResponding;
     }
 
-    _portHasBeenReset = false;
+    retain();
+   _portHasBeenReset = false;
     
     USBLog(3, "+%s[%p] ResetDevice for port %d", getName(), this, _portNumber );
-    retain();
     thread_call_enter( _doPortResetThread );
 
     // Should we do a commandSleep/Wakeup here?
@@ -554,7 +555,7 @@ IOUSBDevice::ResetDevice()
     USBLog(3, "-%s[%p] ResetDevice for port %d", getName(), this, _portNumber );
 
     _resetInProgress = false;
-    
+    release();
     return kIOReturnSuccess;
 }
 
@@ -858,7 +859,7 @@ IOUSBDevice::GetDeviceDescriptor(IOUSBDeviceDescriptor *desc, UInt32 size)
 {
     IOUSBDevRequest	request;
 
-    USBLog(5,"********** GET DEVICE DESCRIPTOR (%d)**********", (int)size);
+    USBLog(5, "%s[%p]::GetDeviceDescriptor (size %d)", getName(), this, size);
 
     if (!desc)
         return  kIOReturnBadArgument;
@@ -886,7 +887,7 @@ IOUSBDevice::GetConfigDescriptor(UInt8 configIndex, void *desc, UInt32 len)
     IOReturn		err = kIOReturnSuccess;
     IOUSBDevRequest	request;
 
-    USBLog(5, "********** GET CONFIG DESCRIPTOR (%d)**********", (int)len);
+    USBLog(5, "%s[%p]::GetConfigDescriptor (length: %d)", getName(), this, len);
 
     /*
      * with config descriptors, the device will send back all descriptors,
@@ -1129,7 +1130,7 @@ IOUSBDevice::SetFeature(UInt8 feature)
     IOReturn		err = kIOReturnSuccess;
     IOUSBDevRequest	request;
 
-    USBLog(5, "********** SET FEATURE %d **********", feature);
+    USBLog(5, "%s[%p]::SetFeature (%d)", getName(), this, feature);
 
     request.bmRequestType = USBmakebmRequestType(kUSBOut, kUSBStandard, kUSBDevice);
     request.bRequest = kUSBRqSetFeature;
@@ -1474,7 +1475,7 @@ IOUSBDevice::GetConfiguration(UInt8 *configNumber)
     IOReturn		err = kIOReturnSuccess;
     IOUSBDevRequest	request;
  
-    USBLog(5, "************ GET CONFIGURATION *************");
+    USBLog(5, "%s[%p]::GetConfiguration", getName(), this);
 
     request.bmRequestType = USBmakebmRequestType(kUSBIn, kUSBStandard, kUSBDevice);
     request.bRequest = kUSBRqGetConfig;
@@ -1501,7 +1502,7 @@ IOUSBDevice::GetDeviceStatus(USBStatus *status)
     IOReturn		err = kIOReturnSuccess;
     IOUSBDevRequest	request;
 
-    USBLog(5, "*********** GET DEVICE STATUS ***********");
+    USBLog(5, "%s[%p]::GetDeviceStatus", getName(), this);
 
     request.bmRequestType = USBmakebmRequestType(kUSBIn, kUSBStandard, kUSBDevice);
     request.bRequest = kUSBRqGetStatus;
@@ -1565,13 +1566,21 @@ IOUSBDevice::GetStringDescriptor(UInt8 index, char *buf, int maxLen, UInt16 lang
         return kIOReturnSuccess;
     }
     
-    // Make sure that desc[1] == kUSBStringDesc and that the length is even
+    // Make sure that desc[1] == kUSBStringDesc 
     //
-    if ( desc[1] != kUSBStringDesc || ((desc[0] & 1) != 0) )
+    if ( desc[1] != kUSBStringDesc )
     {
-        USBLog(2,"%s[%p]::GetStringDescriptor descriptor is not a string (%d ­ kUSBStringDesc) or length (%d) is odd", getName(), this, desc[1], desc[0]);
+        USBLog(2,"%s[%p]::GetStringDescriptor descriptor is not a string (%d ­ kUSBStringDesc)", getName(), this, desc[1] );
         return kIOReturnDeviceError;
     }
+	
+	if ( (desc[0] & 1) != 0) 
+	{
+		// Odd length for the string descriptor!  That is odd.  Truncate it to an even #
+		//
+        USBLog(3,"%s[%p]::GetStringDescriptor descriptor length (%d) is odd, which is illegal", getName(), this, desc[0]);
+		desc[0] &= 0xfe;
+	}
 
     request.wLength = len;
     bzero(desc, len);
@@ -1584,15 +1593,15 @@ IOUSBDevice::GetStringDescriptor(UInt8 index, char *buf, int maxLen, UInt16 lang
         USBLog(2,"%s[%p]::GetStringDescriptor reading entire string returned error (0x%x)",getName(), this, err);
         return err;
     }
-
-    // If the 2nd byte is a string descriptor and the 1st byte is even, then we're OK
-    //
-    if ( (desc[1] != kUSBStringDesc) || ( (desc[0] & 1) != 0 ) )
-    {
-        USBLog(2,"%s[%p]::GetStringDescriptor descriptor is not a string (%d ­ kUSBStringDesc) or length (%d) is odd", getName(), this, desc[1], desc[0]);
-        return kIOReturnDeviceError;
-    }
     
+	if ( (desc[0] & 1) != 0) 
+	{
+		// Odd length for the string descriptor!  That is odd.  Truncate it to an even #
+		//
+        USBLog(3,"%s[%p]::GetStringDescriptor(2) descriptor length (%d) is odd, which is illegal", getName(), this, desc[0]);
+		desc[0] &= 0xfe;
+	}
+
     USBLog(5, "%s[%p]::GetStringDescriptor Got string descriptor %d, length %d, got %d", getName(), this,
              index, desc[0], request.wLength);
 
@@ -1660,37 +1669,45 @@ IOUSBDevice::message( UInt32 type, IOService * provider,  void * argument )
             // as an error.  However, any client that does not implement the message method will return
             // kIOReturnUnsupported, so we have to treat that as not an error
             //
-            USBLog(5, "%s at %d: Hub device name is %s at %d", getName(), _address, _usbPlaneParent->getName(), _usbPlaneParent->GetAddress());
-            rootHub = OSDynamicCast(IOUSBRootHubDevice, _usbPlaneParent);
-            if ( !rootHub )
+            if ( _usbPlaneParent )
             {
-                // Check to see if our parent is still connected. A kIOReturnSuccess means that
-                // our parent is still connected to its parent.
-                //
-                err = _usbPlaneParent->message(kIOUSBMessageHubIsDeviceConnected, NULL, 0);
-            }
-
-           
-            if ( err == kIOReturnSuccess )
-            {
-                iter = _usbPlaneParent->getClientIterator();
-                while( (client = (IOService *) iter->getNextObject())) 
+                _usbPlaneParent->retain();
+                
+                USBLog(5, "%s at %d: Hub device name is %s at %d", getName(), _address, _usbPlaneParent->getName(), _usbPlaneParent->GetAddress());
+                rootHub = OSDynamicCast(IOUSBRootHubDevice, _usbPlaneParent);
+                if ( !rootHub )
                 {
-                    IOSleep(1);
-                    
-                    err = client->message(kIOUSBMessageHubIsDeviceConnected, this, &_portNumber);
-    
-                    // If we get a kIOReturnUnsupported error, treat it as no error
+                    // Check to see if our parent is still connected. A kIOReturnSuccess means that
+                    // our parent is still connected to its parent.
                     //
-                    if ( err == kIOReturnUnsupported )
-                        err = kIOReturnSuccess;
-                    else
-                    
-                    if ( err != kIOReturnSuccess )
-                        break;
+                    err = _usbPlaneParent->message(kIOUSBMessageHubIsDeviceConnected, NULL, 0);
                 }
-                iter->release();
+            
+                if ( err == kIOReturnSuccess )
+                {
+                    iter = _usbPlaneParent->getClientIterator();
+                    while( (client = (IOService *) iter->getNextObject())) 
+                    {
+                        IOSleep(1);
+                        
+                        err = client->message(kIOUSBMessageHubIsDeviceConnected, this, &_portNumber);
+        
+                        // If we get a kIOReturnUnsupported error, treat it as no error
+                        //
+                        if ( err == kIOReturnUnsupported )
+                            err = kIOReturnSuccess;
+                        else
+                        
+                        if ( err != kIOReturnSuccess )
+                            break;
+                    }
+                    iter->release();
+                }
+                _usbPlaneParent->release();
             }
+            else
+                err = kIOReturnNoDevice;
+            
            break;
             
         case kIOUSBMessagePortHasBeenResumed:
@@ -1924,7 +1941,8 @@ IOUSBDevice::ProcessPortResetEntry(OSObject *target)
     
     if (!me)
         return;
-        
+
+    me->retain();
     me->ProcessPortReset();
     me->release();
 }
@@ -1943,6 +1961,7 @@ IOUSBDevice::ProcessPortReset()
     if( _pipeZero) 
     {
         _pipeZero->Abort();
+	_pipeZero->ClosePipe();
         _pipeZero->release();
         _pipeZero = NULL;
     }
@@ -1959,7 +1978,9 @@ IOUSBDevice::ProcessPortReset()
     if ( _usbPlaneParent )
     {
         USBLog(3, "%s[%p] calling messageClients (kIOUSBMessageHubResetPort)", getName(), this);
+        _usbPlaneParent->retain();
         err = _usbPlaneParent->messageClients(kIOUSBMessageHubResetPort, &_portNumber, sizeof(_portNumber));
+        _usbPlaneParent->release();
     }
     
    // Recreate pipe 0 object
@@ -2018,6 +2039,7 @@ IOUSBDevice::ProcessPortReEnumerate(UInt32 options)
     if( _pipeZero) 
     {
         _pipeZero->Abort();
+	_pipeZero->ClosePipe();
         _pipeZero->release();
         _pipeZero = NULL;
     }
@@ -2034,7 +2056,9 @@ IOUSBDevice::ProcessPortReEnumerate(UInt32 options)
     if ( _usbPlaneParent )
     {
         USBLog(3, "%s[%p] calling messageClients (kIOUSBMessageHubReEnumeratePort)", getName(), this);
+        _usbPlaneParent->retain();
         err = _usbPlaneParent->messageClients(kIOUSBMessageHubReEnumeratePort, &params, sizeof(IOUSBHubPortReEnumerateParam));
+        _usbPlaneParent->release();
     }
     
     USBLog(5,"-%s[%p]::ProcessPortReEnumerate",getName(),this); 
@@ -2075,11 +2099,12 @@ IOUSBDevice::ProcessPortSuspend(bool suspend)
     //
     if ( _usbPlaneParent )
     {
+        _usbPlaneParent->retain();
         if ( suspend )
             err = _usbPlaneParent->messageClients(kIOUSBMessageHubSuspendPort, &_portNumber, sizeof(_portNumber));
         else
             err = _usbPlaneParent->messageClients(kIOUSBMessageHubResumePort, &_portNumber, sizeof(_portNumber));
-        
+        _usbPlaneParent->release();
     }
    
      _portSuspendThreadActive = false;
@@ -2141,10 +2166,22 @@ IOUSBDevice::GetDeviceRelease(void)
     return USBToHostWord(_descriptor.bcdDevice); 
 }
 
+UInt16  
+IOUSBDevice::GetbcdUSB(void)
+{ 
+    return USBToHostWord(_descriptor.bcdUSB); 
+}
+
 UInt8  
 IOUSBDevice::GetNumConfigurations(void)
 { 
     return _descriptor.bNumConfigurations; 
+}
+
+UInt8  
+IOUSBDevice::GetProtocol(void)
+{ 
+    return _descriptor.bDeviceProtocol; 
 }
 
 UInt8  

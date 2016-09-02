@@ -50,8 +50,7 @@ enum {
     kErrataLSHSOpti			= (1 << 3),		// Don't cross page boundaries in a single transfer
     kErrataDisableOvercurrent		= (1 << 4),		// Always set the NOCP bit in rhDescriptorA register
     kErrataLucentSuspendResume		= (1 << 5),		// Don't allow port suspend at the root hub
-    kErrataNeedsWatchdogTimer		= (1 << 6),		// Use Watchdog timer to reset confused controllers
-    kErrataIgnorePCIPM			= (1 << 7)		// Ignore PCI PowerManagement registers		
+    kErrataNeedsWatchdogTimer		= (1 << 6)		// Use Watchdog timer to reset confused controllers
 };
 
 
@@ -117,6 +116,7 @@ protected:
     IOUSBRootHubDevice *	_rootHubDevice;
     UInt32			_devZeroLock;
     static UInt32		_busCount;
+    static bool			gUsedBusIDs[16];
     
     struct ExpansionData 
     {
@@ -1012,7 +1012,7 @@ public:
                                                         IOMemoryDescriptor *	pBuffer,
                                                         UInt32			frameCount,
                                                         IOUSBLowLatencyIsocFrame *pFrames,
-                                                        UInt32			updateFrequency) = 0;
+                                                        UInt32			updateFrequency);
 
 
     OSMetaClassDeclareReservedUnused(IOUSBController,  17);
