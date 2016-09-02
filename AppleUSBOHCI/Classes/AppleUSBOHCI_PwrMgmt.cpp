@@ -367,23 +367,13 @@ AppleUSBOHCI::SuspendUSBBus()
     hcControl &= ~(kOHCIHcControl_CLE | kOHCIHcControl_BLE | kOHCIHcControl_PLE | kOHCIHcControl_IE);
             
     _pOHCIRegisters->hcControl = HostToUSBLong(hcControl);
-                                    
-    // wait for SOF to make sure that all list processing is done
-    // first clear the SF interrupt
-    //
-    _pOHCIRegisters->hcInterruptStatus = HostToUSBLong(kOHCIHcInterrupt_SF);
     
-    // now wait 1 millisecond for the bus to finish processing that frame
+    // We used to wait for a SOF interrupt here.  Now just sleep for 1 ms.
+    //
     IOSleep(1);
     
-    // make sure that we have hit the SF interrupt again
-    something = USBToHostLong(_pOHCIRegisters->hcInterruptStatus) & kOHCIInterruptSOFMask;
-    if(!something)
-    {	// This should have been set, just in case wait another ms
-        IOSleep(1);
-    }
-    
     // check for the WDH register to see if we need to process is [2405732]
+    //
     something = USBToHostLong(_pOHCIRegisters->hcInterruptStatus) & kOHCIHcInterrupt_WDH;
     if (something)
     {	/*
@@ -478,7 +468,7 @@ AppleUSBOHCI::ResumeUSBBus()
                 _pOHCIRegisters->hcControl = HostToUSBLong(kOHCIFunctionalState_Operational << kOHCIHcControl_HCFSPhase);
                 IOSleep(3);			// wait the required 3 ms before turning on the lists
                 _pOHCIRegisters->hcControl =  HostToUSBLong((kOHCIFunctionalState_Operational << kOHCIHcControl_HCFSPhase)
-                                                    | kOHCIHcControl_CLE | (_OptiOn ? 0 : kOHCIHcControl_BLE) 
+                                                    | kOHCIHcControl_CLE | (_OptiOn ? kOHCIHcControl_Zero : kOHCIHcControl_BLE) 
                                                     | kOHCIHcControl_PLE | kOHCIHcControl_IE);
                 break;
         default:

@@ -73,18 +73,23 @@ __BEGIN_DECLS
 
 // 4923AC4C-4896-11D5-9208-000A27801E86
 #define kIOUSBInterfaceInterfaceID182 CFUUIDGetConstantUUIDWithBytes(NULL,	\
-    0x49, 0x23, 0xac, 0x4c, 0x48, 0x96, 0x11, 0xD5,			\
+    0x49, 0x23, 0xac, 0x4c, 0x48, 0x96, 0x11, 0xD5,				\
     0x92, 0x08, 0x00, 0x0a, 0x27, 0x80, 0x1e, 0x86)
 
 // 1C438356-74C4-11D5-92E6-000A27801E86
 #define kIOUSBInterfaceInterfaceID183 CFUUIDGetConstantUUIDWithBytes(NULL,	\
-    0x1c, 0x43, 0x83, 0x56, 0x74, 0xc4, 0x11, 0xD5,			\
+    0x1c, 0x43, 0x83, 0x56, 0x74, 0xc4, 0x11, 0xD5,				\
     0x92, 0xe6, 0x00, 0x0a, 0x27, 0x80, 0x1e, 0x86)
 
 // 8FDB8455-74A6-11D6-97B1-003065D3608E
 #define kIOUSBInterfaceInterfaceID190 CFUUIDGetConstantUUIDWithBytes(NULL,	\
-    0x8f, 0xdb, 0x84, 0x55, 0x74, 0xa6, 0x11, 0xD6,			\
+    0x8f, 0xdb, 0x84, 0x55, 0x74, 0xa6, 0x11, 0xD6,				\
     0x97, 0xb1, 0x00, 0x30, 0x65, 0xd3, 0x60, 0x8e)
+
+// 6C798A6E-D6E9-11D6-ADD6-0003933E3E3E
+#define kIOUSBInterfaceInterfaceID192 CFUUIDGetConstantUUIDWithBytes(NULL, 	\
+    0x6C, 0x79, 0x8A, 0x6E, 0xD6, 0xE9, 0x11, 0xD6, 				\
+    0xAD, 0xD6, 0x00, 0x03, 0x93, 0x3E, 0x3E, 0x3E)
 
 //
 // DeviceInterface Functions available in version 1.8 (10.0) and 1.8.1 (10.0.1) of Mac OS X
@@ -242,6 +247,18 @@ typedef struct IOUSBDeviceStruct187 {
 //-----------------------------------------------------------------------------------------
 // END OF InterfaceInterface Functions available in version 1.9.0 Mac OS X
 //-----------------------------------------------------------------------------------------
+// InterfaceInterface Functions available in version 1.9.2 Mac OS X
+//
+#define IOUSBINTERFACE_FUNCS_192 \
+    IOReturn (*LowLatencyReadIsochPipeAsync)(void *self, UInt8 pipeRef, void *buf, UInt64 frameStart, UInt32 numFrames, UInt32 updateFrequency, IOUSBLowLatencyIsocFrame *frameList, \
+                                  IOAsyncCallback1 callback, void *refcon); \
+    IOReturn (*LowLatencyWriteIsochPipeAsync)(void *self, UInt8 pipeRef, void *buf, UInt64 frameStart, UInt32 numFrames, UInt32 updateFrequency, IOUSBLowLatencyIsocFrame *frameList, \
+                                  IOAsyncCallback1 callback, void *refcon); \
+    IOReturn (*LowLatencyCreateBuffer)(void * self, void **buffer, IOByteCount size, UInt32 bufferType); \
+    IOReturn (*LowLatencyDestroyBuffer) (void * self, void * buffer )
+//-----------------------------------------------------------------------------------------
+// END OF InterfaceInterface Functions available in version 1.9.2 Mac OS X
+//-----------------------------------------------------------------------------------------
 
 typedef struct IOUSBInterfaceStruct {
     IUNKNOWN_C_GUTS;
@@ -268,6 +285,15 @@ typedef struct IOUSBInterfaceStruct190 {
     IOUSBINTERFACE_FUNCS_183;
     IOUSBINTERFACE_FUNCS_190;
 } IOUSBInterfaceInterface190;
+
+typedef struct IOUSBInterfaceStruct192 {
+    IUNKNOWN_C_GUTS;
+    IOUSBINTERFACE_FUNCS_180;
+    IOUSBINTERFACE_FUNCS_182;
+    IOUSBINTERFACE_FUNCS_183;
+    IOUSBINTERFACE_FUNCS_190;
+    IOUSBINTERFACE_FUNCS_192;
+} IOUSBInterfaceInterface192;
 
 #define kIOUSBDeviceClassName		"IOUSBDevice"
 #define kIOUSBInterfaceClassName	"IOUSBInterface"

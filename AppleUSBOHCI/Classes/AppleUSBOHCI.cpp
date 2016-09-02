@@ -25,11 +25,14 @@ extern "C" {
 #include <kern/clock.h>
 }
 
+#include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOMemoryCursor.h>
 #include <IOKit/IOMessage.h>
 #include <IOKit/IOPlatformExpert.h>
+
 #include <IOKit/pccard/IOPCCard.h>
 #include <IOKit/platform/ApplePlatformExpert.h>
+
 #include <IOKit/usb/USB.h>
 #include <IOKit/usb/IOUSBLog.h>
 
@@ -61,11 +64,8 @@ enum {
 // ITDs per page == 64
 
 static int GetEDType(OHCIEndpointDescriptorPtr pED);
-static void ProcessCompletedITD (OHCIIsochTransferDescriptorPtr pITD, IOReturn status);
 extern void print_td(OHCIGeneralTransferDescriptorPtr pTD);
 extern void print_itd(OHCIIsochTransferDescriptorPtr x);
-
-static IOReturn TranslateStatusToUSBError(UInt32 status);
 
 OSDefineMetaClassAndStructors(AppleUSBOHCI, IOUSBController)
 
@@ -80,7 +80,16 @@ AppleUSBOHCI::init(OSDictionary * propTable)
     if (!_intLock)
         return(false);
 
+    _wdhLock = IOSimpleLockAlloc();
+    if (!_wdhLock)
+        return(false);
+
     _uimInitialized = false;
+    
+    // Initialize our consumer and producer counts.  
+    //
+    _producerCount = 1;
+    _consumerCount = 1;
     
     return (true);
 }
@@ -169,8 +178,7 @@ AppleUSBOHCI::SetVendorInfo(void)
 IOReturn 
 AppleUSBOHCI::UIMInitialize(IOService * provider)
 {
-    /* UInt16		ivalue, ivalue2; */
-    IOReturn		err = 0;
+    IOReturn		err = kIOReturnSuccess;
     UInt32		lvalue;
 
     USBLog(5,"%s[%p]: initializing UIM", getName(), this);
@@ -193,9 +201,26 @@ AppleUSBOHCI::UIMInitialize(IOService * provider)
 
         SetVendorInfo();
 
-        _interruptSource = IOInterruptEventSource::interruptEventSource(this, &InterruptHandler, _device);
-        if (!_interruptSource || (_workLoop->addEventSource(_interruptSource) != kIOReturnSuccess))
-            continue;
+        // Set up a filter interrupt source (this process both primary (thru filter function) and secondary (thru action function)
+        // interrupts.
+        //
+        _filterInterruptSource = IOFilterInterruptEventSource::filterInterruptEventSource(this,
+                                                                            AppleUSBOHCI::InterruptHandler,	
+                                                                            AppleUSBOHCI::PrimaryInterruptFilter,
+                                                                            provider );
+                                                                            
+        if ( !_filterInterruptSource )
+        {
+             USBError(1,"%s[%p]: unable to get filterInterruptEventSource", getName(), this);
+             continue;
+        }
+        
+        err = _workLoop->addEventSource(_filterInterruptSource);
+        if ( err != kIOReturnSuccess )
+        {
+             USBError(1,"%s[%p]: unable to add filter event source: 0x%x", getName(), this, err);
+             continue;
+        }
 
         _genCursor = IONaturalMemoryCursor::withSpecification(PAGE_SIZE, PAGE_SIZE);
         if(!_genCursor)
@@ -324,7 +349,8 @@ AppleUSBOHCI::UIMInitialize(IOService * provider)
     USBError(1, "%s[%p]::UIMInitialize error(%x)", getName(), this, err);
     UIMFinalize();
 
-    if (_interruptSource) _interruptSource->release();
+    if (_filterInterruptSource) 
+        _filterInterruptSource->release();
 
     return(err);
 }
@@ -348,7 +374,7 @@ AppleUSBOHCI::UIMFinalize(void)
     if ( !isInactive() )
     {
         // Disable All OHCI Interrupts
-        _pOHCIRegisters->hcInterruptDisable = kOHCIHcInterrupt_MIE;
+        _pOHCIRegisters->hcInterruptDisable = HostToUSBLong(kOHCIHcInterrupt_MIE);
         IOSync();
     
         // Place the USB bus into the Reset State
@@ -388,11 +414,11 @@ AppleUSBOHCI::UIMFinalize(void)
     
     // Remove the interruptEventSource we created
     //
-    if ( _interruptSource )
+    if ( _filterInterruptSource )
     {
-        _workLoop->removeEventSource(_interruptSource);
-        _interruptSource->release();
-        _interruptSource = NULL;
+        _workLoop->removeEventSource(_filterInterruptSource);
+        _filterInterruptSource->release();
+        _filterInterruptSource = NULL;
     }
     
     // Release the memory cursors
@@ -719,11 +745,11 @@ AppleUSBOHCI::GetLogicalAddress (UInt32 pPhysicalAddress)
         }
     }
 
-    if ( LogicalAddress == NULL)
+/*    if ( LogicalAddress == NULL)
     {
         USBLog(3, "%s[%p]: LogicalAddress(0x%lx) == NULL !", getName(), this, pPhysicalAddress);
     }
-    
+*/    
     return (LogicalAddress);
 
 }
@@ -954,7 +980,7 @@ AppleUSBOHCI::AllocateITD(void)
             return NULL;
         }
 
-        itdsPerPage = _pageSize / sizeof (OHCIIsochTransferDescriptorPtr);
+        itdsPerPage = _pageSize / sizeof (OHCIIsochTransferDescriptor);
         _pFreeITD = freeITDCurrent = (OHCIIsochTransferDescriptorPtr)p;
         physical = GetPhysicalAddress((UInt32) freeITDCurrent, 1);
         
@@ -962,11 +988,11 @@ AppleUSBOHCI::AllocateITD(void)
         {
             // Create TDs
             //
-            freeITDCurrent[j].pPhysical = physical + (j * sizeof (OHCIIsochTransferDescriptorPtr));
+            freeITDCurrent[j].pPhysical = physical + (j * sizeof (OHCIIsochTransferDescriptor));
             freeITDCurrent[j].pLogicalNext = &freeITDCurrent[j+1];
         }
         
-        freeITDCurrent[j].pPhysical = physical + (j * sizeof (OHCIIsochTransferDescriptorPtr));
+        freeITDCurrent[j].pPhysical = physical + (j * sizeof (OHCIIsochTransferDescriptor));
         freeITDCurrent[j].pLogicalNext = NULL;
         _pLastFreeITD = &freeITDCurrent[j];
         freeITD = _pFreeITD;
@@ -1001,7 +1027,7 @@ AppleUSBOHCI::AllocateTD(void)
         int 	tdsPerPage;
         UInt32 	physical;
         
-        USBLog(5,"%s[%p]: Out of General TDs.  Allocating some more", getName(), this);
+        USBLog(3,"%s[%p]: Out of General TDs.  Allocating some more", getName(), this);
         
         // Note:  We should keep this pointer around so that we can release this
         // memory when the controller goes away (think PC Card)
@@ -1128,7 +1154,8 @@ AppleUSBOHCI::DeallocateTD (OHCIGeneralTransferDescriptorPtr pTD)
     pTD->pLogicalNext = NULL;
     pTD->pPhysical = physical;
 
-    if (_pFreeTD){
+    if (_pFreeTD)
+    {
         _pLastFreeTD->pLogicalNext = pTD;
         _pLastFreeTD = pTD;
     } else {
@@ -1268,70 +1295,173 @@ AppleUSBOHCI::RemoveTDs(OHCIEndpointDescriptorPtr pED)
 
 
 void 
-ProcessCompletedITD (OHCIIsochTransferDescriptorPtr pITD, IOReturn status)
+AppleUSBOHCI::ProcessCompletedITD (OHCIIsochTransferDescriptorPtr pITD, IOReturn status)
 {
 
     IOUSBIsocFrame *	pFrames;
+    IOUSBLowLatencyIsocFrame * pLLFrames;
     int			i;
     int			frameCount;
     IOReturn		aggregateStatus = kIOReturnSuccess;
     IOReturn		frameStatus;
     UInt32		itdConditionCode;
     bool		hadUnderrun = false;
-
-    pFrames = pITD->pIsocFrame;
-    frameCount = (USBToHostLong(pITD->flags) & kOHCIITDControl_FC) >> kOHCIITDControl_FCPhase;
+    UInt32		delta;
+    UInt32		curFrame;
+    AbsoluteTime	timeStop, timeStart;
+    UInt64       	timeElapsed;
     
+    pFrames = pITD->pIsocFrame;
+    pLLFrames = (IOUSBLowLatencyIsocFrame *) pITD->pIsocFrame;
+    
+    frameCount = (USBToHostLong(pITD->flags) & kOHCIITDControl_FC) >> kOHCIITDControl_FCPhase;
+        
     itdConditionCode = (USBToHostLong(pITD->flags) & kOHCIITDControl_CC) >> kOHCIITDControl_CCPhase;
     
+
+    // USBLog(3, "%s[%p]::ProcessCompletedITD: filter interrupt duration: %ld", getName(), this, (UInt32) timeElapsed);
+
     if (itdConditionCode == kOHCIITDConditionDataOverrun)
     {
             // The OHCI controller sets the status to DATAOVERRUN in this case.  However, we translate it to kIOReturnIsoTooOld
             // so that a client need not look at every frame list to determine that they were not sent.  If it gets a 
             // kIOReturnIsoTooOld, then it can assume that all the frames have a not sent error.
             //
-            status = kIOReturnIsoTooOld;
+            status = kIOReturnIsoTooOld; 
 
-            USBLog(5,"ProcessCompletedITD: Data Overrun in Isoch xfer. Entire TD (%p) was too late, will return kIOReturnIsoTooOld (0x%x)", pITD, status);
+            USBLog(5,"%s[%p]::ProcessCompletedITD: Data Overrun in Isoch xfer. Entire TD (%p) was too late, will return kIOReturnIsoTooOld (0x%x)", getName(), this,pITD, status);
+    }
+    
+    // Do some calculations related to the low latency isoch TDs:
+    //
+    if ( (_filterInterruptCount != 0 ) &&
+         ( (pITD->pType == kOHCIIsochronousInLowLatencyType) || 
+           (pITD->pType == kOHCIIsochronousOutLowLatencyType) ) )
+    {
+        clock_get_uptime (&timeStop);
+        timeStart = pLLFrames[pITD->frameNum].frTimeStamp;
+        SUB_ABSOLUTETIME(&timeStop, &timeStart); 
+        absolutetime_to_nanoseconds(timeStop, &timeElapsed); 
+        
+        if ( _lowLatencyIsochTDsProcessed != 0 )
+        {
+            USBLog(6, "%s[%p]::ProcessCompletedITD: LowLatency isoch TD's proccessed: %d, framesUpdated: %d, framesError: %d",  getName(), this, _lowLatencyIsochTDsProcessed, _framesUpdated, _framesError);
+            USBLog(7, "%s[%p]::ProcessCompletedITD: delay in microsecs before callback (from hw interrupt time): %ld", getName(), this, (UInt32) timeElapsed / 1000);
+            
+            // SUB_ABSOLUTETIME(&_filterTimeStamp2, &_filterTimeStamp); 
+            // absolutetime_to_nanoseconds(_filterTimeStamp2, &timeElapsed); 
+            // USBLog(7, "%s[%p]::ProcessCompletedITD: filter interrupt duration: %ld", getName(), this, (UInt32) timeElapsed / 1000);
+        }
+        
+        // These need to be updated only when we process a TD due to an interrupt
+        //
+        _lowLatencyIsochTDsProcessed = 0;
+        _framesUpdated = 0;
+        _framesError = 0; 
     }
     
     for (i=0; i <= frameCount; i++)
     {
-        UInt16 offset = USBToHostWord(pITD->offset[i]);
-        
-        if ( ((offset & kOHCIITDOffset_CC) >> kOHCIITDOffset_CCPhase) == kOHCIITDOffsetConditionNotAccessed)
+        // Need to process low latency isoch differently than other isoc, as the frameList has an extra parameter (use pLLFrame instead of pFrame )
+        //
+        if ( (pITD->pType == kOHCIIsochronousInLowLatencyType) || (pITD->pType == kOHCIIsochronousOutLowLatencyType) )
         {
-            USBLog(5,"ProcessCompletedITD  Isoch frame not accessed. Frame in request(1 based) %d, IsocFramePtr: %p, ITD: %p, Frames in this TD: %d, Relative frame in TD: %d", pITD->frameNum + i + 1, pFrames, pITD, frameCount+1, i+1);
-            pFrames[pITD->frameNum + i].frActCount = 0;
-            pFrames[pITD->frameNum + i].frStatus = kOHCIITDConditionNotAccessedReturn;
-        }
+            UInt16 offset = USBToHostWord(pITD->offset[i]);
+            
+            // Check to see if we really processed this itd before:
+            // 
+            if ( (_filterInterruptCount != 0 ) &&
+                    ( (pITD->pType == kOHCIIsochronousInLowLatencyType) || 
+                    (pITD->pType == kOHCIIsochronousOutLowLatencyType) ) )
+            {
+                if ( (pLLFrames[pITD->frameNum + i].frStatus != (IOReturn) kUSBLowLatencyIsochTransferKey) ) 
+                {
+                    // USBLog(7,"%s[%p]::ProcessCompletedITD: frame processed at hw interrupt time: frame: %d, frReqCount: %d, frActCount: %d, frStatus: 0x%x frTimeStamp.lo: 0x%x",  getName(), this, i, pLLFrames[pITD->frameNum + i].frReqCount, pLLFrames[pITD->frameNum + i].frActCount, pLLFrames[pITD->frameNum + i].frStatus, pLLFrames[pITD->frameNum + i].frTimeStamp.lo);
+                    USBLog(6,"%s[%p]::ProcessCompletedITD: frame processed at hw interrupt time: frame: %d,  frTimeStamp.lo: 0x%x",  getName(), this, i, pLLFrames[pITD->frameNum + i].frTimeStamp.lo);
+                    
+                }
+            }
+            
+            
+            if ( ((offset & kOHCIITDOffset_CC) >> kOHCIITDOffset_CCPhase) == kOHCIITDOffsetConditionNotAccessed)
+            {
+                USBLog(6,"%s[%p]::ProcessCompletedITD:  Isoch frame not accessed. Frame in request(1 based) %d, IsocFramePtr: %p, ITD: %p, Frames in this TD: %d, Relative frame in TD: %d",  getName(), this, pITD->frameNum + i + 1, pLLFrames, pITD, frameCount+1, i+1);
+                pLLFrames[pITD->frameNum + i].frActCount = 0;
+                pLLFrames[pITD->frameNum + i].frStatus = kOHCIITDConditionNotAccessedReturn;
+            }
+            else
+            {
+                pLLFrames[pITD->frameNum + i].frStatus = (offset & kOHCIITDPSW_CC) >> kOHCIITDPSW_CCPhase;
+                
+                // Successful isoch transmit sets the size field to zero,
+                // successful receive sets size to actual packet size received.
+                if ( (kIOReturnSuccess == pLLFrames[pITD->frameNum + i].frStatus) && 
+                    ( (pITD->pType == kOHCIIsochronousOutType) || (pITD->pType == kOHCIIsochronousOutLowLatencyType) ) )
+                    pLLFrames[pITD->frameNum + i].frActCount = pLLFrames[pITD->frameNum + i].frReqCount;
+                else
+                    pLLFrames[pITD->frameNum + i].frActCount = offset & kOHCIITDPSW_Size;
+            }
+            
+            // Translate the OHCI Condition to one of the appropriate USB errors.  We use aggregateStatus to determine
+            // later on whether there was an error in any of the frames.  If there was, then we set the completion error
+            // to that reported in the aggregateStatus.  There is no priority in the aggregateStatus except that if there
+            // is a data underrun AND another type of error, then we report the "other" error.
+            //
+            frameStatus = pLLFrames[pITD->frameNum + i].frStatus;
+            
+            
+            if ( frameStatus != kIOReturnSuccess )
+            {
+                pLLFrames[pITD->frameNum + i].frStatus =  TranslateStatusToUSBError(frameStatus);
+                
+                if ( pLLFrames[pITD->frameNum + i].frStatus == kIOReturnUnderrun )
+                    hadUnderrun = true;
+                else
+                    aggregateStatus = pLLFrames[pITD->frameNum + i].frStatus;
+            }
+        }    
         else
         {
-            pFrames[pITD->frameNum + i].frStatus = (offset & kOHCIITDPSW_CC) >> kOHCIITDPSW_CCPhase;
+            // Process non-low latency isoch 
+            //
+            UInt16 offset = USBToHostWord(pITD->offset[i]);
             
-            // Successful isoch transmit sets the size field to zero,
-            // successful receive sets size to actual packet size received.
-            if((kIOReturnSuccess == pFrames[pITD->frameNum + i].frStatus) && (pITD->pType == kOHCIIsochronousOutType))
-                pFrames[pITD->frameNum + i].frActCount = pFrames[pITD->frameNum + i].frReqCount;
+            if ( ((offset & kOHCIITDOffset_CC) >> kOHCIITDOffset_CCPhase) == kOHCIITDOffsetConditionNotAccessed)
+            {
+                USBLog(6,"%s[%p]::ProcessCompletedITD:  Isoch frame not accessed. Frame in request(1 based) %d, IsocFramePtr: %p, ITD: %p, Frames in this TD: %d, Relative frame in TD: %d",  getName(), this, pITD->frameNum + i + 1, pFrames, pITD, frameCount+1, i+1);
+                pFrames[pITD->frameNum + i].frActCount = 0;
+                pFrames[pITD->frameNum + i].frStatus = kOHCIITDConditionNotAccessedReturn;
+            }
             else
-                pFrames[pITD->frameNum + i].frActCount = offset & kOHCIITDPSW_Size;
-        }
-        
-        // Translate the OHCI Condition to one of the appropriate USB errors.  We use aggregateStatus to determine
-        // later on whether there was an error in any of the frames.  If there was, then we set the completion error
-        // to that reported in the aggregateStatus.  There is no priority in the aggregateStatus except that if there
-        // is a data underrun AND another type of error, then we report the "other" error.
-        //
-        frameStatus = pFrames[pITD->frameNum + i].frStatus;
-        
-        if ( frameStatus != kIOReturnSuccess )
-        {
-            pFrames[pITD->frameNum + i].frStatus =  TranslateStatusToUSBError(frameStatus);
+            {
+                pFrames[pITD->frameNum + i].frStatus = (offset & kOHCIITDPSW_CC) >> kOHCIITDPSW_CCPhase;
+                
+                // Successful isoch transmit sets the size field to zero,
+                // successful receive sets size to actual packet size received.
+                if ( (kIOReturnSuccess == pFrames[pITD->frameNum + i].frStatus) && 
+                    ( (pITD->pType == kOHCIIsochronousOutType) || (pITD->pType == kOHCIIsochronousOutLowLatencyType) ) )
+                    pFrames[pITD->frameNum + i].frActCount = pFrames[pITD->frameNum + i].frReqCount;
+                else
+                    pFrames[pITD->frameNum + i].frActCount = offset & kOHCIITDPSW_Size;
+            }
             
-            if ( pFrames[pITD->frameNum + i].frStatus == kIOReturnUnderrun )
-                hadUnderrun = true;
-            else
-                aggregateStatus = pFrames[pITD->frameNum + i].frStatus;
+            // Translate the OHCI Condition to one of the appropriate USB errors.  We use aggregateStatus to determine
+            // later on whether there was an error in any of the frames.  If there was, then we set the completion error
+            // to that reported in the aggregateStatus.  There is no priority in the aggregateStatus except that if there
+            // is a data underrun AND another type of error, then we report the "other" error.
+            //
+            frameStatus = pFrames[pITD->frameNum + i].frStatus;
+            
+            
+            if ( frameStatus != kIOReturnSuccess )
+            {
+                pFrames[pITD->frameNum + i].frStatus =  TranslateStatusToUSBError(frameStatus);
+                
+                if ( pFrames[pITD->frameNum + i].frStatus == kIOReturnUnderrun )
+                    hadUnderrun = true;
+                else
+                    aggregateStatus = pFrames[pITD->frameNum + i].frStatus;
+            }
         }
     }
     
@@ -1341,7 +1471,7 @@ ProcessCompletedITD (OHCIIsochTransferDescriptorPtr pITD, IOReturn status)
     {
         IOUSBIsocCompletionAction pHandler;
         
-        // If we had an error in any of the frames, then report that error as the status for this framelist
+       // If we had an error in any of the frames, then report that error as the status for this framelist
         //
         if ( (status == kIOReturnSuccess) && ( (aggregateStatus != kIOReturnSuccess) || hadUnderrun) )
         {
@@ -1350,13 +1480,15 @@ ProcessCompletedITD (OHCIIsochTransferDescriptorPtr pITD, IOReturn status)
             if ( (aggregateStatus == kIOReturnSuccess) && hadUnderrun )
                 aggregateStatus = kIOReturnUnderrun;
                 
-            USBLog(6, "Changing isoc completion error from success to 0x%x",aggregateStatus);
+            USBLog(6, "%s[%p]::ProcessCompletedITD: Changing isoc completion error from success to 0x%x", getName(), this, aggregateStatus);
             
             status = aggregateStatus;
         }
         
         // Zero out handler first than call it
         //
+        USBLog(6,"%s[%p]::ProcessCompletedITD: calling completion", getName(), this, pITD);
+        
         pHandler = pITD->completion.action;
         pITD->completion.action = NULL;
        (*pHandler) (pITD->completion.target,  pITD->completion.parameter, status, pFrames);
@@ -1364,43 +1496,126 @@ ProcessCompletedITD (OHCIIsochTransferDescriptorPtr pITD, IOReturn status)
 }
 
 
+void 
+AppleUSBOHCI::UIMProcessDoneQueue(IOUSBCompletionAction safeAction)
+{
+    UInt32				interruptStatus;
+    IOPhysicalAddress			PhysAddr;
+    OHCIGeneralTransferDescriptorPtr 	pHCDoneTD;
+    UInt32				cachedProducer;
+    IOPhysicalAddress			cachedWriteDoneQueueHead;
+    IOInterruptState			intState;
+    
+
+    // Get the values of the Done Queue Head and the producer count.  We use a lock and disable interrupts
+    // so that the filter routine does not preempt us and updates the values while we're trying to read them.
+    //
+    intState = IOSimpleLockLockDisableInterrupt( _wdhLock );
+    
+    cachedWriteDoneQueueHead = _savedDoneQueueHead;
+    cachedProducer = _producerCount;
+    
+    IOSimpleLockUnlockEnableInterrupt( _wdhLock, intState );
+    
+    // OK, now that we have a valid queue head in cachedWriteDoneQueueHead, let's process the list
+    //
+    DoDoneQueueProcessing( cachedWriteDoneQueueHead, cachedProducer, safeAction);
+
+    return;
+
+}
+
 
 IOReturn
-AppleUSBOHCI::DoDoneQueueProcessing(OHCIGeneralTransferDescriptorPtr pHCDoneTD,
-                                 IOUSBCompletionAction safeAction)
+AppleUSBOHCI::DoDoneQueueProcessing(IOPhysicalAddress cachedWriteDoneQueueHead, UInt32 cachedProducer, IOUSBCompletionAction safeAction)
 {
     UInt32				control, transferStatus;
     long				bufferSizeRemaining;
-    OHCIGeneralTransferDescriptorPtr	prevTD, nextTD;
-    IOPhysicalAddress			PhysAddr;
+    OHCIGeneralTransferDescriptorPtr	pHCDoneTD, prevTD, nextTD;
+    IOPhysicalAddress			physicalAddress;
     UInt32				pageMask;
     OHCIEndpointDescriptorPtr		tempED;
     OHCIIsochTransferDescriptorPtr	pITD;
+    volatile UInt32			cachedConsumer;
+    UInt32				numTDs = 0;
+    // This should never happen
+    //
+    if (cachedWriteDoneQueueHead == NULL)
+        return kIOReturnSuccess;
 
-    if(pHCDoneTD == NULL)
-        /* This should not happen */
-        return(kIOReturnSuccess);
-
-    pageMask = ~(_pageSize - 1);
-
-    /* Reverse the done queue use only the virtual Address fields */
-    prevTD = 0;
-    while (pHCDoneTD != NULL)
+    // Cache our consumer count
+    //
+    cachedConsumer = _consumerCount;
+    
+    // If for some reason our cachedConsumer and cachedProducer are the same, then we need to bail out, as we
+    // don't have anything to process
+    //
+    if ( cachedConsumer == cachedProducer)
     {
-        PhysAddr = USBToHostLong(pHCDoneTD->nextTD) & kOHCIHeadPMask;
-        nextTD = (OHCIGeneralTransferDescriptorPtr) GetLogicalAddress(PhysAddr);
+        USBLog(3, "%s[%p]::DoDoneQueueProcessing  consumer (%d) == producer (%d) Filter count: %d", getName(), this, cachedConsumer, cachedProducer, _filterInterruptCount);
+        return kIOReturnSuccess;
+    }
+    
+    // Get the logical address for our cachedQueueHead
+    //
+    pHCDoneTD = (OHCIGeneralTransferDescriptorPtr) GetLogicalAddress(cachedWriteDoneQueueHead);
+    
+    // Now, reverse the queue.  We know how many TD's to process, not by the last one pointing to NULL,
+    // but by the fact that cachedConsumer != cachedProducer.  So, go through the loop and increment consumer
+    // until they are equal, taking care or the wraparound case.
+    //
+    prevTD = NULL;
+
+    while ( true )
+    {
         pHCDoneTD->pLogicalNext = prevTD;
         prevTD = pHCDoneTD;
+        numTDs++;
+        
+        // Increment our consumer count.  If we wrap around, then increment again.  If we reach
+        // the end (both counts are equal, then brake out of the loop
+        // 
+        cachedConsumer++;
+           
+        if ( cachedProducer == cachedConsumer)
+            break;
+    
+        physicalAddress = USBToHostLong(pHCDoneTD->nextTD) & kOHCIHeadPMask;
+        nextTD = (OHCIGeneralTransferDescriptorPtr) GetLogicalAddress(physicalAddress);
+        if ( nextTD == NULL )
+        {
+            USBLog(5, "%s[%p]::DoDoneQueueProcessing nextTD = NULL.  (%p, %d, %d, %d)", getName(), this, physicalAddress, _filterInterruptCount, cachedProducer, cachedConsumer);
+            break;
+        }
+        
         pHCDoneTD = nextTD;
+            
     }
-    pHCDoneTD = prevTD;	/* New qHead */
 
+
+    // New done queue head
+    //
+    pHCDoneTD = prevTD;
+    
+    // Update our consumer count
+    //
+    _consumerCount = cachedConsumer;
+    
+/*
+    if ( (numTDs > 1) || (numTDs < 1) )
+    {
+        USBLog(3,"Processed %d (%d) TDs, # filtInterr: %ld, time Interval: %ld", numTDs, _lowLatencyIsochTDsProcessed, _filterInterruptCount, (UInt32) _timeElapsed );
+    }
+*/
+    
+    // Now, we have a new done queue head.  Now process this reversed list in LOGICAL order.  That
+    // means that we can look for a NULL termination
+    //
     while (pHCDoneTD != NULL)
     {
-#if (DEBUGGING_LEVEL > 2)
-        USBLog(6, "%s[%p]::DoDoneQueueProcessing", getName(), this); print_td(pHCDoneTD);
-#endif
+        // USBLog(6, "%s[%p]::DoDoneQueueProcessing", getName(), this); // print_td(pHCDoneTD);
         IOReturn errStatus;
+        
         // find the next one
         nextTD	= pHCDoneTD->pLogicalNext;
 
@@ -1431,7 +1646,7 @@ AppleUSBOHCI::DoDoneQueueProcessing(OHCIGeneralTransferDescriptorPtr pHCDoneTD,
             tempED->tdQueueHeadPtr = USBToHostLong(pHCDoneTD->pPhysical) | (tempED->tdQueueHeadPtr & HostToUSBLong( kOHCIEDToggleBitMask));
             _pOHCIRegisters->hcCommandStatus = HostToUSBLong(kOHCIHcCommandStatus_BLF);
         }
-        else if ((pHCDoneTD->pType == kOHCIIsochronousInType) || (pHCDoneTD->pType == kOHCIIsochronousOutType))
+        else if ( (pHCDoneTD->pType == kOHCIIsochronousInType) || (pHCDoneTD->pType == kOHCIIsochronousOutType) || (pHCDoneTD->pType == kOHCIIsochronousInLowLatencyType) || (pHCDoneTD->pType == kOHCIIsochronousOutLowLatencyType) )
         {
             // cast to a isoc type
             pITD = (OHCIIsochTransferDescriptorPtr) pHCDoneTD;
@@ -1475,38 +1690,6 @@ AppleUSBOHCI::DoDoneQueueProcessing(OHCIGeneralTransferDescriptorPtr pHCDoneTD,
     }
 
     return(kIOReturnSuccess);
-}
-
-
-
-
-void 
-AppleUSBOHCI::UIMProcessDoneQueue(IOUSBCompletionAction safeAction)
-{
-    UInt32				interruptStatus;
-    IOPhysicalAddress			PhysAddr;
-    OHCIGeneralTransferDescriptorPtr 	pHCDoneTD;
-
-
-    // check if the OHCI has written the DoneHead yet
-    interruptStatus = USBToHostLong(_pOHCIRegisters->hcInterruptStatus);
-    if( (interruptStatus & kOHCIHcInterrupt_WDH) == 0)
-    {	
-        return;
-    }
-
-    // get the pointer to the list (logical address)
-    PhysAddr = (UInt32) USBToHostLong(*(UInt32 *)(_pHCCA + 0x84));
-    PhysAddr &= kOHCIHeadPMask; // mask off interrupt bits
-    pHCDoneTD = (OHCIGeneralTransferDescriptorPtr) GetLogicalAddress(PhysAddr);
-    // write to 0 to the HCCA DoneHead ptr so we won't look at it anymore.
-    *(UInt32 *)(_pHCCA + 0x84) = 0L;
-
-    // Since we have a copy of the queue to process, we can let the host update it again.
-    _pOHCIRegisters->hcInterruptStatus = HostToUSBLong(kOHCIHcInterrupt_WDH);
-
-    DoDoneQueueProcessing(pHCDoneTD, safeAction);
-    return;
 }
 
 
@@ -1621,7 +1804,7 @@ AppleUSBOHCI::dumpRegs(void)
 
 
 IOReturn 
-TranslateStatusToUSBError(UInt32 status)
+AppleUSBOHCI::TranslateStatusToUSBError(UInt32 status)
 {
     static const UInt32 statusToErrorMap[] = {
         /* OHCI Error */     /* USB Error */
@@ -1660,7 +1843,7 @@ AppleUSBOHCI::ReturnTransactions(
     OHCIIsochTransferDescriptorPtr	nextIsochTransaction = NULL;
 
     USBLog(6, "%s[%p]::ReturnTransactions: (0x%x, 0x%x)", getName(), this, (UInt32) transaction->pPhysical, tail);
-    if ( (transaction->pType == kOHCIIsochronousInType) || (transaction->pType == kOHCIIsochronousOutType) )
+    if ( (transaction->pType == kOHCIIsochronousInType) || (transaction->pType == kOHCIIsochronousOutType) || (transaction->pType == kOHCIIsochronousInLowLatencyType) || (transaction->pType == kOHCIIsochronousOutLowLatencyType))
     {
         // We have an isoc transaction
         //
@@ -1727,16 +1910,11 @@ AppleUSBOHCI::ReturnOneTransaction(
     
     // first mark the pED as skipped so we don't conflict
     pED->flags |= HostToUSBLong (kOHCIEDControl_K);
-    _pOHCIRegisters->hcInterruptStatus = HostToUSBLong(kOHCIHcInterrupt_SF);
+    
+    // We used to wait for a SOF interrupt here.  Now just sleep for 1 ms.
+    //
     IOSleep(1);
-    something = USBToHostLong(_pOHCIRegisters->hcInterruptStatus) & kOHCIInterruptSOFMask;
-
-    if (!something)
-    {
-        /* This should have been set, just in case wait another ms */
-        IOSleep(1);
-    }
-
+    
     // make sure we are still on the same transaction
     if (transaction->pPhysical == (USBToHostLong(pED->tdQueueHeadPtr) & kOHCIHeadPMask))
     {
@@ -1939,7 +2117,7 @@ AppleUSBOHCI::UIMFinalizeForPowerDown(void)
     _workLoop->disableAllInterrupts();
     
     // Disable All OHCI Interrupts
-    _pOHCIRegisters->hcInterruptDisable = kOHCIHcInterrupt_MIE;
+    _pOHCIRegisters->hcInterruptDisable = HostToUSBLong(kOHCIHcInterrupt_MIE);
     IOSync();
     
     // Place the USB bus into the Reset State
@@ -1970,5 +2148,17 @@ AppleUSBOHCI::UIMFinalizeForPowerDown(void)
     _uimInitialized = false;
     
     return kIOReturnSuccess;
+}
+
+
+void
+AppleUSBOHCI::free()
+{
+    // Free our locks
+    //
+    IOLockFree( _intLock );
+    IOSimpleLockFree( _wdhLock );
+    
+    super::free();
 }
 
